@@ -89,7 +89,7 @@ class CacheManager:
     def clear_cache_for_service(self, service: RcloneService, systemd: SystemdManager) -> CommandResult:
         path = service.cache_path or self.cache_path_for(service)
         if not self.is_safe_cache_path(path) or path == self.cache_base:
-            return CommandResult(False, "", f"Unsafe cache path: {path}", 1)
+            return CommandResult(False, "", f"Ruta local no segura: {path}", 1)
         stop = systemd.stop(service.name)
         if not stop.ok:
             return stop
@@ -102,7 +102,7 @@ class CacheManager:
         start = systemd.start(service.name)
         if not start.ok:
             return start
-        return CommandResult(True, f"Cache cleaned: {path}", "", 0)
+        return CommandResult(True, f"Espacio liberado: {path}", "", 0)
 
     def clear_all(self, services: list[RcloneService], systemd: SystemdManager) -> list[tuple[str, CommandResult]]:
         results: list[tuple[str, CommandResult]] = []

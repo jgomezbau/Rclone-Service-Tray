@@ -25,6 +25,7 @@ def run(argv: list[str]) -> int:
     systemd = SystemdManager()
     window = MainWindow(config, systemd, Notifier(None, config.show_notifications))
     tray = TrayController(window)
+    window.set_tray_controller(tray)
     tray.show()
     window.notifier.tray = tray.tray
     window.quit_requested.connect(app.quit)

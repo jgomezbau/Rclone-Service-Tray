@@ -16,12 +16,16 @@ APP_LOG_FILE = APP_CONFIG_DIR / "rclone-service-tray.log"
 class AppConfig:
     theme: str = "system"
     services: list[str] = field(default_factory=list)
+    ignored_services: list[str] = field(default_factory=list)
+    last_error_clear_time: dict[str, str] = field(default_factory=dict)
     confirm_cache_clean: bool = True
     start_minimized: bool = True
     minimize_to_tray: bool = True
     show_notifications: bool = True
+    show_tray_indicators: bool = True
     refresh_interval_seconds: int = 10
     cache_refresh_interval_seconds: int = 60
+    activity_window_seconds: int = 60
     systemd_user_dir: str = str(Path.home() / ".config" / "systemd" / "user")
     mounts_base_dir: str = str(Path.home() / "CloudDrives")
     rclone_cache_dir: str = str(Path.home() / ".cache" / "rclone" / "vfs")
