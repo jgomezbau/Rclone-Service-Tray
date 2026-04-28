@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rclonetray.activity_detector import ActivityDetector, select_activity_summary
+from rclonetray.activity_detector import ActivityDetector
 from rclonetray.cache_manager import CacheManager, human_size
 from rclonetray.config import AppConfig, save_config
 from rclonetray.dialogs import CacheDialog, ErrorDialog, ServiceEditorDialog, TextDialog
 from rclonetray.icons import icon
-from rclonetray.log_manager import LogManager
+from rclonetray.log_manager import ErrorEntry, LogManager
 from rclonetray.notifications import Notifier
 from rclonetray.rc_client import ActivitySummary, RcloneRcClient
 from rclonetray.service_model import RcloneService
@@ -44,6 +44,10 @@ STATUS_LABELS = {
     "failed": "⚠️ Con errores",
     "activating": "🔵 Montando",
     "deactivating": "🟡 Reiniciando",
+    "mounting": "🔵 Montando",
+    "starting": "🔵 Montando",
+    "stopping": "🟡 Deteniendo",
+    "restarting": "🟡 Reiniciando",
 }
 
 ACTIVITY_LABELS = {
@@ -145,15 +149,8 @@ class MainWindow(QMainWindow):
             service.cache_files = info.files
             service.cache_mtime = info.mtime
             self.logs.sync_service_errors(service, self._last_error_clear_time(service))
-            history_errors = self.logs.history_errors_for_service(service)
-            service.recent_errors = len(history_errors)
-            service.last_error = history_errors[-1] if history_errors else None
-            service.recent_error = bool(history_errors)
-            if service.recent_error:
-                service.activity = "error"
-                service.activity_source = "logs"
-            else:
-                self._update_service_activity(service)
+            self._update_service_activity(service)
+            self._refresh_error_state(service)
         self._populate_table()
         if self.tray_controller is not None:
             self.tray_controller.update_services(self.services)
@@ -166,11 +163,11 @@ class MainWindow(QMainWindow):
             if service.remote:
                 remote.setToolTip(service.remote)
             self.table.setItem(row, 0, remote)
-            status = QTableWidgetItem(STATUS_LABELS.get(service.active_state, service.active_state))
+            status = QTableWidgetItem(self._status_label(service))
             status.setToolTip("Clic para acciones de estado")
             self.table.setItem(row, 1, status)
             activity = QLabel(self._activity_label(service.activity))
-            activity.setToolTip(ACTIVITY_LABELS.get(service.activity, service.activity))
+            activity.setToolTip(self._activity_tooltip(service))
             self.table.setCellWidget(row, 2, activity)
             api = QTableWidgetItem(self._rc_status_label(service))
             api.setToolTip(self._rc_status_tooltip(service))
@@ -185,7 +182,9 @@ class MainWindow(QMainWindow):
                     f"{service.cache_files} archivos, modificado {dt.datetime.fromtimestamp(service.cache_mtime):%Y-%m-%d %H:%M}"
                 )
             self.table.setItem(row, 5, cache_item)
-            self.table.setItem(row, 6, QTableWidgetItem(str(service.recent_errors)))
+            error_item = QTableWidgetItem(str(service.recent_errors))
+            error_item.setToolTip(self._error_tooltip(service))
+            self.table.setItem(row, 6, error_item)
             actions = QPushButton()
             actions.setIcon(icon("view-more-vertical", "open-menu-symbolic", "application-menu"))
             actions.setToolTip("Más opciones")
@@ -242,17 +241,17 @@ class MainWindow(QMainWindow):
 
     def _status_menu(self, service: RcloneService) -> QMenu:
         menu = QMenu(self)
-        menu.addAction(icon("media-playback-start"), "Iniciar", lambda: self._run_service_action("Iniciar", self.systemd.start(service.name)))
-        menu.addAction(icon("media-playback-stop"), "Detener", lambda: self._run_service_action("Detener", self.systemd.stop(service.name)))
-        menu.addAction(icon("view-refresh"), "Reiniciar", lambda: self._run_service_action("Reiniciar", self.systemd.restart(service.name)))
+        menu.addAction(icon("media-playback-start"), "Iniciar", lambda s=service: self.start_service(s))
+        menu.addAction(icon("media-playback-stop"), "Detener", lambda s=service: self.stop_service(s))
+        menu.addAction(icon("view-refresh"), "Reiniciar", lambda s=service: self.restart_service(s))
         menu.addAction(icon("dialog-information"), "Ver estado systemd", lambda: self.show_text("Estado systemd", self.systemd.status(service.name).stdout))
         return menu
 
     def _service_menu(self, service: RcloneService) -> QMenu:
         menu = QMenu(self)
-        menu.addAction(icon("media-playback-start"), "Iniciar", lambda: self._run_service_action("Iniciar", self.systemd.start(service.name)))
-        menu.addAction(icon("media-playback-stop"), "Detener", lambda: self._run_service_action("Detener", self.systemd.stop(service.name)))
-        menu.addAction(icon("view-refresh"), "Reiniciar", lambda: self._run_service_action("Reiniciar", self.systemd.restart(service.name)))
+        menu.addAction(icon("media-playback-start"), "Iniciar", lambda s=service: self.start_service(s))
+        menu.addAction(icon("media-playback-stop"), "Detener", lambda s=service: self.stop_service(s))
+        menu.addAction(icon("view-refresh"), "Reiniciar", lambda s=service: self.restart_service(s))
         menu.addAction(icon("dialog-information"), "Ver estado", lambda: self.show_text("Estado systemd", self.systemd.status(service.name).stdout))
         menu.addSeparator()
         menu.addAction(icon("folder-open"), "Abrir ubicación", lambda: self.open_mountpoint(service))
@@ -263,7 +262,7 @@ class MainWindow(QMainWindow):
         menu.addAction(icon("document-edit"), "Editar .service", lambda: ServiceEditorDialog(service, self.systemd, self).exec())
         menu.addAction(icon("dialog-ok", "emblem-default"), "Validar .service", lambda: self.validate_service(service))
         menu.addAction(icon("edit-delete", "user-trash"), "Liberar espacio en disco", lambda: self.clean_cache(service))
-        menu.addAction(icon("system-run"), "Recargar daemon", lambda: self._run_service_action("daemon-reload", self.systemd.daemon_reload()))
+        menu.addAction(icon("system-run"), "Recargar daemon", lambda: self._run_simple_systemd_action("daemon-reload", self.systemd.daemon_reload()))
         return menu
 
     def _activity_label(self, activity: str) -> str:
@@ -289,14 +288,26 @@ class MainWindow(QMainWindow):
                 widget.setText(self._activity_label(service.activity))
 
     def _update_service_activity(self, service: RcloneService) -> None:
+        if self._transient_state_active(service):
+            service.activity = "syncing"
+            service.activity_source = "transient"
+            return
         if service.rc_enabled:
             cached = service.activity_summary
             rc_summary = cached if isinstance(cached, ActivitySummary) and cached.source == "rc" else None
-            fallback = self.activity.get_activity_summary(service)
-            selected = select_activity_summary(service, rc_summary, fallback)
-            service.activity = selected.state
-            service.activity_source = selected.source
-            service.activity_summary = selected
+            if rc_summary is not None and rc_summary.state != "unavailable":
+                service.activity = rc_summary.state
+                service.activity_source = "rc"
+                service.activity_summary = rc_summary
+                service.rc_error_count = rc_summary.error_count
+            elif service.rc_status == "unavailable":
+                fallback = self.activity.get_activity_summary(service)
+                service.activity = fallback.state
+                service.activity_source = "logs"
+                service.activity_summary = fallback
+            else:
+                service.activity = "idle"
+                service.activity_source = "rc"
             self._request_rc_summary(service)
             return
         service.rc_status = "not_configured"
@@ -333,18 +344,19 @@ class MainWindow(QMainWindow):
         service.rc_last_check = dt.datetime.now().replace(microsecond=0).isoformat()
         if summary.state == "unavailable":
             service.rc_status = "unavailable"
+            service.rc_error_count = 0
             fallback = self.activity.get_activity_summary(service)
             service.activity = fallback.state
             service.activity_source = "logs"
             service.activity_summary = fallback
         else:
             service.rc_status = "active"
+            service.rc_error_count = summary.error_count
             service.activity = summary.state
             service.activity_source = "rc"
             service.activity_summary = summary
-        self._populate_table()
-        if self.tray_controller is not None:
-            self.tray_controller.update_services(self.services)
+        self._refresh_error_state(service)
+        self._update_service_row(service)
 
     def _rc_status_label(self, service: RcloneService) -> str:
         if service.rc_warning:
@@ -376,9 +388,139 @@ class MainWindow(QMainWindow):
             parts.append("Autenticación: desactivada por --rc-no-auth")
         return "\n".join(parts)
 
-    def _run_service_action(self, title: str, result) -> None:
+    def start_service(self, service: RcloneService):
+        return self._run_service_action("Iniciar", service, self.systemd.start, "starting", "Montando servicio…")
+
+    def stop_service(self, service: RcloneService):
+        return self._run_service_action("Detener", service, self.systemd.stop, "stopping", "Deteniendo servicio…")
+
+    def restart_service(self, service: RcloneService):
+        return self._run_service_action("Reiniciar", service, self.systemd.restart, "restarting", "Reiniciando servicio…")
+
+    def _start_service(self, service: RcloneService) -> None:
+        self.start_service(service)
+
+    def _stop_service(self, service: RcloneService) -> None:
+        self.stop_service(service)
+
+    def _restart_service(self, service: RcloneService) -> None:
+        self.restart_service(service)
+
+    def _run_service_action(self, title: str, service: RcloneService, action, transient_state: str, message: str):
+        self._set_transient_state(service, transient_state, message)
+        result = action(service.name)
+        service.active_state, service.sub_state = self.systemd.show_state(service.name)
+        self._clear_transient_state(service)
+        self._update_service_activity(service)
+        self._refresh_error_state(service)
+        self._update_service_row(service)
+        QMessageBox.information(self, title, result.stdout or result.stderr or "Comando finalizado.")
+        return result
+
+    def _set_transient_state(self, service: RcloneService, state: str, message: str) -> None:
+        service.transient_state = state
+        service.transient_message = message
+        service.transient_until = dt.datetime.now() + dt.timedelta(seconds=20)
+        if state in {"restarting", "starting", "stopping"}:
+            service.activity = "syncing"
+        service.activity_source = "transient"
+        self._update_service_row(service)
+        if self.tray_controller is not None:
+            self.tray_controller.update_services(self.services)
+        QApplication.processEvents()
+
+    def _clear_transient_state(self, service: RcloneService) -> None:
+        service.transient_state = None
+        service.transient_message = None
+        service.transient_until = None
+
+    def _transient_state_active(self, service: RcloneService) -> bool:
+        until = service.transient_until
+        if service.transient_state is None:
+            return False
+        if isinstance(until, dt.datetime) and until < dt.datetime.now():
+            self._clear_transient_state(service)
+            return False
+        return True
+
+    def _run_simple_systemd_action(self, title: str, result) -> None:
         self.refresh()
         QMessageBox.information(self, title, result.stdout or result.stderr or "Comando finalizado.")
+
+    def _refresh_error_state(self, service: RcloneService) -> None:
+        cleared_after = self._last_error_clear_time(service)
+        history_entries = self.logs.active_history_error_entries_for_service(service, cleared_after=cleared_after)
+        all_history_entries = self.logs.history_error_entries_for_service(service, cleared_after=cleared_after)
+        service.service_failed = service.active_state == "failed"
+        service.error_count_history = len(history_entries)
+        service.last_error = history_entries[-1].line if history_entries else None
+        service.recent_error = self._service_has_visual_error(service)
+        service.recent_errors = service.error_count_history + service.rc_error_count + (1 if service.service_failed else 0)
+        if not history_entries and all_history_entries:
+            service.last_error = all_history_entries[-1].line
+
+    def _service_has_visual_error(self, service: RcloneService) -> bool:
+        return service.service_failed or service.rc_error_count > 0 or service.error_count_history > 0
+
+    def _activity_tooltip(self, service: RcloneService) -> str:
+        if service.activity_source == "transient":
+            return service.transient_message or "Operación en curso"
+        if service.activity_source == "rc":
+            return "Actividad en tiempo real desde RC/API"
+        return "Actividad estimada desde logs"
+
+    def _status_label(self, service: RcloneService) -> str:
+        if self._transient_state_active(service):
+            return STATUS_LABELS.get(service.transient_state or "", service.transient_state or service.active_state)
+        return STATUS_LABELS.get(service.active_state, service.active_state)
+
+    def _error_tooltip(self, service: RcloneService) -> str:
+        return "\n".join(
+            [
+                f"Historial log/app: {service.error_count_history}",
+                f"RC core/stats errors: {service.rc_error_count}",
+                f"systemd failed: {'sí' if service.service_failed else 'no'}",
+            ]
+        )
+
+    def _update_service_row(self, service: RcloneService) -> None:
+        try:
+            row = self.services.index(service)
+        except ValueError:
+            return
+        if row >= self.table.rowCount():
+            self._populate_table()
+            return
+        status = self.table.item(row, 1)
+        if status is None:
+            status = QTableWidgetItem()
+            self.table.setItem(row, 1, status)
+        status.setText(self._status_label(service))
+        status.setToolTip(service.transient_message or "Clic para acciones de estado")
+
+        widget = self.table.cellWidget(row, 2)
+        if not isinstance(widget, QLabel):
+            widget = QLabel()
+            self.table.setCellWidget(row, 2, widget)
+        widget.setText(self._activity_label(service.activity))
+        widget.setToolTip(self._activity_tooltip(service))
+
+        api = self.table.item(row, 3)
+        if api is None:
+            api = QTableWidgetItem()
+            self.table.setItem(row, 3, api)
+        api.setText(self._rc_status_label(service))
+        api.setToolTip(self._rc_status_tooltip(service))
+
+        errors = self.table.item(row, 6)
+        if errors is None:
+            errors = QTableWidgetItem()
+            self.table.setItem(row, 6, errors)
+        errors.setText(str(service.recent_errors))
+        errors.setToolTip(self._error_tooltip(service))
+
+        if self.tray_controller is not None:
+            self.tray_controller.update_services(self.services)
 
     def show_text(self, title: str, text: str, actions=None) -> None:
         TextDialog(title, text or "Sin salida.", self, actions=actions).exec()
@@ -401,11 +543,11 @@ class MainWindow(QMainWindow):
     def show_all_errors(self) -> None:
         chunks = []
         for service in self.services:
-            errors = self.logs.original_errors(service)
+            errors = self.logs.history_error_entries_for_service(service, cleared_after=self._last_error_clear_time(service))
             if errors:
                 chunks.append(
                     f"== {service.name} ==\n" +
-                    self.logs.format_grouped_errors(errors, "Sin errores actuales en los logs originales.")
+                    self.logs.format_grouped_errors(errors, "Sin errores registrados.")
                 )
         self.show_text("Errores recientes", "\n\n".join(chunks) or "Sin errores recientes.")
 
@@ -420,10 +562,11 @@ class MainWindow(QMainWindow):
         )
 
     def _rc_activity_text(self, service: RcloneService, summary: ActivitySummary) -> str:
+        state_label = ACTIVITY_LABELS.get(summary.state, summary.state).split(" ", 1)[-1]
         lines = [
             "Fuente: RC/API",
             f"URL: {service.rc_url or '-'}",
-            f"Estado: {summary.state}",
+            f"Estado actual: {state_label}",
             f"Transferencias activas: {summary.transferring_count}",
             f"Checks activos: {summary.checking_count}",
             f"Velocidad: {human_size(int(summary.speed))}/s",
@@ -434,16 +577,19 @@ class MainWindow(QMainWindow):
         ]
         if not summary.active_files:
             lines.append("Sin transferencias activas.")
-            return "\n".join(lines)
-        for item in summary.active_files:
-            name = item.get("name") or item.get("src") or item.get("dst") or "-"
-            operation = item.get("operation") or item.get("direction") or summary.state
-            done = item.get("bytes") or item.get("transferred") or 0
-            total = item.get("size") or item.get("total") or 0
-            speed = item.get("speed") or 0
-            percentage = item.get("percentage")
-            progress = f"{percentage}%" if percentage is not None else f"{human_size(int(done))} / {human_size(int(total))}"
-            lines.append(f"- {name} | {operation} | {progress} | {human_size(int(speed))}/s")
+        else:
+            for item in summary.active_files:
+                name = item.get("name") or item.get("src") or item.get("dst") or "-"
+                operation = item.get("operation") or item.get("direction") or summary.state
+                done = item.get("bytes") or item.get("transferred") or 0
+                total = item.get("size") or item.get("total") or 0
+                speed = item.get("speed") or 0
+                percentage = item.get("percentage")
+                progress = f"{percentage}%" if percentage is not None else f"{human_size(int(done))} / {human_size(int(total))}"
+                lines.append(f"- {name} | {operation} | {progress} | {human_size(int(speed))}/s")
+        recent_events = self.activity.relevant_lines(service)[-20:]
+        lines.extend(["", "Eventos recientes del log:"])
+        lines.extend(recent_events or ["No hay líneas de log disponibles."])
         return "\n".join(lines)
 
     def show_logs(self, service: RcloneService) -> None:
@@ -586,11 +732,21 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Limpiar historial de errores", result.stdout or result.stderr)
 
     def _history_errors_text(self, service: RcloneService) -> str:
-        history = self.logs.history_errors_for_service(service)
+        history = self.logs.history_error_entries_for_service(service, cleared_after=self._last_error_clear_time(service))
+        if service.rc_error_count > 0:
+            history = [
+                ErrorEntry(f"RC core/stats errors: {service.rc_error_count}", severity="critical", source="RC"),
+                *history,
+            ]
+        if service.service_failed:
+            history = [
+                ErrorEntry(f"systemd service failed: {service.active_state}/{service.sub_state}", severity="critical", source="journalctl"),
+                *history,
+            ]
         return self.logs.format_grouped_errors(history, "No hay errores registrados por la app para este servicio.")
 
     def _original_errors_text(self, service: RcloneService) -> str:
-        errors = self.logs.original_errors(service)
+        errors = self.logs.original_error_entries(service)
         return self.logs.format_grouped_errors(errors, "No hay errores actuales en los logs originales.")
 
     def _clear_error_history_from_dialog(self, service: RcloneService, dialog: ErrorDialog) -> None:
@@ -625,20 +781,22 @@ class MainWindow(QMainWindow):
         self.config.last_error_clear_time[service.name] = dt.datetime.now().replace(microsecond=0).isoformat()
         save_config(self.config)
         service.recent_errors = 0
+        service.error_count_history = 0
         service.last_error = None
-        service.recent_error = False
-        if service.active_state != "failed":
-            service.activity = self.activity.detect(service)
+        self._update_service_activity(service)
+        self._refresh_error_state(service)
+        self._update_service_row(service)
 
     def _mark_all_error_history_cleared(self) -> None:
         now = dt.datetime.now().replace(microsecond=0).isoformat()
         for service in self.services:
             self.config.last_error_clear_time[service.name] = now
             service.recent_errors = 0
+            service.error_count_history = 0
             service.last_error = None
-            service.recent_error = False
-            if service.active_state != "failed":
-                service.activity = self.activity.detect(service)
+            self._update_service_activity(service)
+            self._refresh_error_state(service)
+            self._update_service_row(service)
         save_config(self.config)
 
     def set_tray_controller(self, tray_controller) -> None:
@@ -648,9 +806,18 @@ class MainWindow(QMainWindow):
     def restart_all(self) -> None:
         output = []
         for service in self.services:
+            self._set_transient_state(service, "restarting", "Reiniciando servicio…")
+        QApplication.processEvents()
+        for service in self.services:
             result = self.systemd.restart(service.name)
+            service.active_state, service.sub_state = self.systemd.show_state(service.name)
+            self._clear_transient_state(service)
+            self._update_service_activity(service)
+            self._refresh_error_state(service)
+            self._update_service_row(service)
             output.append(f"{service.name}: {'OK' if result.ok else 'ERROR'} {result.stderr or result.stdout}")
-        self.refresh()
+        if self.tray_controller is not None:
+            self.tray_controller.update_services(self.services)
         QMessageBox.information(self, "Reiniciar todos", "\n".join(output))
 
     def open_settings(self) -> None:

@@ -113,3 +113,10 @@ def test_idle_stats_return_idle() -> None:
     summary = activity_summary_from_stats({"bytes": 0, "speed": 0, "transferring": [], "checking": []})
 
     assert summary.state == "idle"
+
+
+def test_core_stats_error_count_is_preserved() -> None:
+    summary = activity_summary_from_stats({"bytes": 0, "speed": 0, "transfers": 0, "checks": 0, "errors": 3})
+
+    assert summary.state == "idle"
+    assert summary.error_count == 3

@@ -16,6 +16,9 @@ class RcloneService:
     flags: dict[str, str | bool] = field(default_factory=dict)
     active_state: str = "unknown"
     sub_state: str = "unknown"
+    transient_state: str | None = None
+    transient_message: str | None = None
+    transient_until: Any | None = None
     activity: str = "idle"
     cache_path: Path | None = None
     cache_size: int | None = None
@@ -24,6 +27,9 @@ class RcloneService:
     recent_errors: int = 0
     last_error: str | None = None
     recent_error: bool = False
+    error_count_history: int = 0
+    rc_error_count: int = 0
+    service_failed: bool = False
     rc_enabled: bool = False
     rc_addr: str | None = None
     rc_url: str | None = None

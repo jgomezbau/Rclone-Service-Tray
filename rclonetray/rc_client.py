@@ -24,6 +24,7 @@ class ActivitySummary:
     raw_stats: dict[str, Any] = field(default_factory=dict)
     source: str = "none"
     error: str | None = None
+    error_count: int = 0
 
 
 class RcloneRcClient:
@@ -97,12 +98,13 @@ def activity_summary_from_stats(stats: dict[str, Any]) -> ActivitySummary:
     checking = _list_value(stats.get("checking"))
     transfers_count = _int_value(stats.get("transfers"))
     checks_count = _int_value(stats.get("checks"))
+    error_count = _int_value(stats.get("errors"))
     bytes_done = _int_value(stats.get("bytes"))
     speed = _float_value(stats.get("speed"))
     total_size = sum(_int_value(item.get("size")) for item in transferring if isinstance(item, dict))
     if not total_size:
         total_size = _int_value(stats.get("totalBytes")) or bytes_done
-    state = _state_from_stats(transferring, checking, speed)
+    state = _state_from_stats(transferring, checking, speed, transfers_count, checks_count)
     return ActivitySummary(
         state=state,
         transfers_count=transfers_count,
@@ -114,10 +116,19 @@ def activity_summary_from_stats(stats: dict[str, Any]) -> ActivitySummary:
         active_files=[item for item in transferring if isinstance(item, dict)],
         raw_stats=stats,
         source="rc",
+        error_count=error_count,
     )
 
 
-def _state_from_stats(transferring: list[Any], checking: list[Any], speed: float) -> str:
+def _state_from_stats(
+    transferring: list[Any],
+    checking: list[Any],
+    speed: float,
+    transfers_count: int = 0,
+    checks_count: int = 0,
+) -> str:
+    if not transferring and not checking and transfers_count == 0 and checks_count == 0 and speed == 0:
+        return "idle"
     if transferring:
         text = " ".join(str(item) for item in transferring).lower()
         if "download" in text or "downloading" in text:
@@ -126,6 +137,8 @@ def _state_from_stats(transferring: list[Any], checking: list[Any], speed: float
             return "uploading"
         return "syncing" if speed > 0 else "syncing"
     if checking:
+        return "syncing"
+    if transfers_count > 0 or checks_count > 0 or speed > 0:
         return "syncing"
     return "idle"
 

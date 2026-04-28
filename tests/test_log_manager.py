@@ -86,3 +86,47 @@ def test_webdav_dns_diagnosis_is_suggested() -> None:
     assert diagnosis.commands[0] == "resolvectl query cloud.example.com"
     assert diagnosis.commands[1] == "curl -I https://cloud.example.com/remote.php"
     assert diagnosis.commands[2] == "rclone lsf Nextcloud: --max-depth 1 -vv"
+
+
+def test_temporary_lock_error_followed_by_real_upload_is_resolved_warning(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026/04/28 10:00:00 ERROR : CV JJGB/Cartas/.~archivo.docx: Failed to copy: context canceled: Put \"https://cloud.example.com/very/long/url\": context canceled",
+                "2026/04/28 10:00:05 INFO  : CV JJGB/Cartas/archivo.docx: upload succeeded",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    history = tmp_path / "errors.jsonl"
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", log_file=log_file)
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=history)  # type: ignore[arg-type]
+
+    logs.sync_service_errors(service)
+    entries = logs.history_error_entries_for_service(service)
+    grouped = logs.grouped_errors(entries)
+
+    assert entries[0].severity == "warning_resolved"
+    assert grouped[0].message == "Failed to copy: context canceled"
+    assert grouped[0].file == "CV JJGB/Cartas/.~archivo.docx"
+
+
+def test_resolved_temporary_error_is_not_active_history_error(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026/04/28 10:00:00 ERROR : folder/.~file.docx: Failed to copy: context canceled",
+                "2026/04/28 10:00:01 INFO  : folder/file.docx: upload succeeded",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", log_file=log_file)
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=tmp_path / "errors.jsonl")  # type: ignore[arg-type]
+
+    logs.sync_service_errors(service)
+
+    assert logs.history_error_entries_for_service(service)
+    assert logs.active_history_error_entries_for_service(service) == []
