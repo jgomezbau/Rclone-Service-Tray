@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Rclone Service Tray
+Comment=System tray manager for rclone mounts
+Exec=rclone-service-tray
+Icon=rclone-service-tray
+Terminal=false
+Type=Application
+Categories=Utility;System;

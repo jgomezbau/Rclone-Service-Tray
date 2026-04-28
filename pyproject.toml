@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rclone-service-tray"
+version = "1.0.0"
+description = "System tray manager for rclone mounts managed by systemd user services"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rclone Service Tray contributors" }]
+dependencies = ["PySide6>=6.6"]
+keywords = ["rclone", "systemd", "tray", "kde", "linux"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Desktop Environment",
+  "Topic :: System :: Filesystems",
+]
+
+[project.scripts]
+rclone-service-tray = "rclonetray.main:main"
+
+[tool.setuptools.packages.find]
+include = ["rclonetray*"]
+
+[tool.setuptools.package-data]
+rclonetray = ["resources/icons/*"]

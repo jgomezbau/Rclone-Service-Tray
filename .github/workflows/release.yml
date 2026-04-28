@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev fuse libfuse2 wget
+          python -m pip install --upgrade pip
+      - name: Install appimagetool
+        run: |
+          wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          sudo mv appimagetool /usr/local/bin/appimagetool
+      - name: Build artifacts
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}" scripts/build_deb.sh
+          VERSION="${GITHUB_REF_NAME#v}" scripts/build_appimage.sh
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
