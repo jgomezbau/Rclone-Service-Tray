@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from rclonetray.log_manager import LogManager, is_error_line, normalize_error_message
+from rclonetray.log_manager import LogManager, classify_error_entry, classify_error_line, is_error_line, normalize_error_message
 from rclonetray.service_model import RcloneService
 from rclonetray.systemd_manager import CommandResult
 
@@ -110,6 +110,7 @@ def test_temporary_lock_error_followed_by_real_upload_is_resolved_warning(tmp_pa
     assert entries[0].severity == "warning_resolved"
     assert grouped[0].message == "Failed to copy: context canceled"
     assert grouped[0].file == "CV JJGB/Cartas/.~archivo.docx"
+    assert grouped[0].error_type == "Archivo temporal de editor"
 
 
 def test_resolved_temporary_error_is_not_active_history_error(tmp_path: Path) -> None:
@@ -130,3 +131,53 @@ def test_resolved_temporary_error_is_not_active_history_error(tmp_path: Path) ->
 
     assert logs.history_error_entries_for_service(service)
     assert logs.active_history_error_entries_for_service(service) == []
+
+
+def test_temporary_editor_error_is_warning_without_success() -> None:
+    line = "2026/04/28 10:00:00 ERROR : .~cumento sin título.docx: Failed to copy: couldn't list directory: context canceled"
+
+    assert classify_error_line(line, [line]) == "warning"
+
+
+def test_temporary_editor_warning_is_not_active_history_error(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text(
+        "2026/04/28 10:00:00 ERROR : ~$file.docx: Failed to copy: couldn't list directory: context canceled\n",
+        encoding="utf-8",
+    )
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", log_file=log_file)
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=tmp_path / "errors.jsonl")  # type: ignore[arg-type]
+
+    logs.sync_service_errors(service)
+
+    entries = logs.history_error_entries_for_service(service)
+    assert entries[0].severity == "warning"
+    assert entries[0].error_type == "Archivo temporal de editor"
+    assert logs.active_history_error_entries_for_service(service) == []
+
+
+def test_vfs_cache_errors_are_grouped_as_single_warning() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    entries = [
+        "2026/04/28 10:00:00 ERROR : Codice Fiscale e Cellulare.docx: vfs cache: failed to open item: open /home/user/.cache/rclone/vfs/Mega/Codice Fiscale e Cellulare.docx: no such file or directory",
+        "2026/04/28 10:00:01 ERROR : Codice Fiscale e Cellulare.docx: Non-out-of-space error encountered during open",
+        "2026/04/28 10:00:02 ERROR : Codice Fiscale e Cellulare.docx: open RW handle failed to open cache file: open /home/user/.cache/rclone/vfs/Mega/Codice Fiscale e Cellulare.docx: no such file or directory",
+    ]
+    grouped = logs.grouped_errors([classify_error_entry(line, entries) for line in entries])
+
+    assert len(grouped) == 1
+    assert grouped[0].severity == "warning"
+    assert grouped[0].error_type == "VFS cache local inconsistente"
+    assert grouped[0].message == "VFS cache local inconsistente al abrir archivo"
+    assert grouped[0].file == "Codice Fiscale e Cellulare.docx"
+    assert grouped[0].count == 3
+    assert "Non-out-of-space error encountered during open" in grouped[0].detail
+
+
+def test_repeated_vfs_cache_error_is_critical() -> None:
+    lines = [
+        f"2026/04/28 10:00:0{index} ERROR : file.docx: vfs cache: failed to open item: open /home/user/.cache/rclone/vfs/Mega/file.docx: no such file or directory"
+        for index in range(4)
+    ]
+
+    assert classify_error_line(lines[0], lines) == "critical"

@@ -5,7 +5,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -27,7 +27,7 @@ from rclonetray.activity_detector import ActivityDetector
 from rclonetray.cache_manager import CacheManager, human_size
 from rclonetray.config import AppConfig, save_config
 from rclonetray.dialogs import CacheDialog, ErrorDialog, ServiceEditorDialog, TextDialog
-from rclonetray.icons import icon
+from rclonetray.icons import app_icon, colored_dot_icon, icon
 from rclonetray.log_manager import ErrorEntry, LogManager
 from rclonetray.notifications import Notifier
 from rclonetray.rc_client import ActivitySummary, RcloneRcClient
@@ -39,15 +39,36 @@ from rclonetray.theme_manager import apply_theme
 
 
 STATUS_LABELS = {
-    "active": "🟢 Activo",
-    "inactive": "🔴 Detenido",
-    "failed": "⚠️ Con errores",
-    "activating": "🔵 Montando",
-    "deactivating": "🟡 Reiniciando",
-    "mounting": "🔵 Montando",
-    "starting": "🔵 Montando",
-    "stopping": "🟡 Deteniendo",
-    "restarting": "🟡 Reiniciando",
+    "active": "Activo",
+    "inactive": "Detenido",
+    "failed": "Con errores",
+    "activating": "Montando",
+    "deactivating": "Reiniciando",
+    "mounting": "Montando",
+    "starting": "Montando",
+    "stopping": "Deteniendo",
+    "restarting": "Reiniciando",
+}
+
+STATUS_COLORS = {
+    "active": "#16a34a",
+    "inactive": "#dc2626",
+    "failed": "#d92d20",
+    "activating": "#2563eb",
+    "deactivating": "#d97706",
+    "mounting": "#2563eb",
+    "starting": "#2563eb",
+    "stopping": "#d97706",
+    "restarting": "#d97706",
+}
+
+RC_STATUS_COLORS = {
+    "active": "#16a34a",
+    "checking": "#d97706",
+    "unknown": "#d97706",
+    "unavailable": "#d97706",
+    "not_configured": "#9ca3af",
+    "warning": "#d92d20",
 }
 
 ACTIVITY_LABELS = {
@@ -74,6 +95,7 @@ class MainWindow(QMainWindow):
         self.cache = CacheManager(Path(config.rclone_cache_dir))
         self.logs = LogManager(systemd, Path(config.logs_dir))
         self.activity = ActivityDetector(self.logs, self.config.activity_window_seconds)
+        self.app_started_at = dt.datetime.now()
         self.services: list[RcloneService] = []
         self._activity_frame = 0
         self._initial_size_applied = False
@@ -81,6 +103,7 @@ class MainWindow(QMainWindow):
         self._rc_pending: set[str] = set()
         self.tray_controller = None
         self.setWindowTitle("Rclone Service Tray")
+        self.setWindowIcon(app_icon())
         self._build_ui()
         self.rc_summary_ready.connect(self._apply_rc_summary)
         self.reload_services()
@@ -165,12 +188,14 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 0, remote)
             status = QTableWidgetItem(self._status_label(service))
             status.setToolTip("Clic para acciones de estado")
+            self._apply_status_decoration(status, service)
             self.table.setItem(row, 1, status)
             activity = QLabel(self._activity_label(service.activity))
             activity.setToolTip(self._activity_tooltip(service))
             self.table.setCellWidget(row, 2, activity)
             api = QTableWidgetItem(self._rc_status_label(service))
             api.setToolTip(self._rc_status_tooltip(service))
+            self._apply_rc_status_decoration(api, service)
             self.table.setItem(row, 3, api)
             mount = QTableWidgetItem(str(service.mount_point or "-"))
             if service.mount_point:
@@ -283,11 +308,13 @@ class MainWindow(QMainWindow):
             return
         self._activity_frame += 1
         for row, service in enumerate(self.services):
+            self._check_transient_expiry(service)
             widget = self.table.cellWidget(row, 2)
             if isinstance(widget, QLabel):
                 widget.setText(self._activity_label(service.activity))
 
     def _update_service_activity(self, service: RcloneService) -> None:
+        self._check_transient_expiry(service)
         if self._transient_state_active(service):
             service.activity = "syncing"
             service.activity_source = "transient"
@@ -301,7 +328,7 @@ class MainWindow(QMainWindow):
                 service.activity_summary = rc_summary
                 service.rc_error_count = rc_summary.error_count
             elif service.rc_status == "unavailable":
-                fallback = self.activity.get_activity_summary(service)
+                fallback = self._log_pulse_summary(service)
                 service.activity = fallback.state
                 service.activity_source = "logs"
                 service.activity_summary = fallback
@@ -311,10 +338,17 @@ class MainWindow(QMainWindow):
             self._request_rc_summary(service)
             return
         service.rc_status = "not_configured"
-        summary = self.activity.get_activity_summary(service)
+        summary = self._log_pulse_summary(service)
         service.activity = summary.state
         service.activity_source = "logs"
         service.activity_summary = summary
+
+    def _log_pulse_summary(self, service: RcloneService) -> ActivitySummary:
+        summary = self.activity.get_activity_summary(service, since=self.app_started_at, max_age_seconds=10)
+        if summary.state != "idle":
+            service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+            service.activity_reason = "log"
+        return summary
 
     def _request_rc_summary(self, service: RcloneService) -> None:
         if service.name in self._rc_pending:
@@ -342,17 +376,24 @@ class MainWindow(QMainWindow):
         if service is None or not service.rc_enabled:
             return
         service.rc_last_check = dt.datetime.now().replace(microsecond=0).isoformat()
+        self._check_transient_expiry(service)
         if summary.state == "unavailable":
             service.rc_status = "unavailable"
             service.rc_error_count = 0
-            fallback = self.activity.get_activity_summary(service)
+            fallback = self._log_pulse_summary(service)
             service.activity = fallback.state
             service.activity_source = "logs"
             service.activity_summary = fallback
         else:
             service.rc_status = "active"
             service.rc_error_count = summary.error_count
-            service.activity = summary.state
+            if summary.state == "idle" and not self._activity_pulse_active(service):
+                self._clear_activity_pulse(service)
+                service.activity = "idle"
+            elif summary.state == "idle":
+                service.activity = "idle"
+            else:
+                service.activity = summary.state
             service.activity_source = "rc"
             service.activity_summary = summary
         self._refresh_error_state(service)
@@ -360,16 +401,16 @@ class MainWindow(QMainWindow):
 
     def _rc_status_label(self, service: RcloneService) -> str:
         if service.rc_warning:
-            return "⚠️ Inseguro"
+            return "Inseguro"
         if not service.rc_enabled:
-            return "⚪ No configurado"
+            return "No configurado"
         if service.rc_status == "active":
-            return "🟢 RC activo"
+            return "RC activo"
         if service.rc_status in {"checking", "unknown"}:
-            return "🟡 Comprobando"
+            return "Comprobando"
         if service.rc_status == "unavailable":
-            return "🟡 No responde"
-        return "⚪ No configurado"
+            return "No responde"
+        return "No configurado"
 
     def _rc_status_tooltip(self, service: RcloneService) -> str:
         if not service.rc_enabled:
@@ -434,6 +475,29 @@ class MainWindow(QMainWindow):
         service.transient_message = None
         service.transient_until = None
 
+    def _clear_activity_pulse(self, service: RcloneService) -> None:
+        service.activity_until = None
+        service.activity_reason = None
+
+    def _activity_pulse_active(self, service: RcloneService) -> bool:
+        until = service.activity_until
+        if until is None:
+            return False
+        if isinstance(until, dt.datetime) and until < dt.datetime.now():
+            self._clear_activity_pulse(service)
+            return False
+        return True
+
+    def _check_transient_expiry(self, service: RcloneService) -> None:
+        self._transient_state_active(service)
+        if self._activity_pulse_active(service):
+            return
+        if service.rc_enabled and service.rc_status == "active":
+            cached = service.activity_summary
+            if isinstance(cached, ActivitySummary) and cached.source == "rc" and cached.state == "idle":
+                service.activity = "idle"
+                service.activity_source = "rc"
+
     def _transient_state_active(self, service: RcloneService) -> bool:
         until = service.transient_until
         if service.transient_state is None:
@@ -474,6 +538,26 @@ class MainWindow(QMainWindow):
             return STATUS_LABELS.get(service.transient_state or "", service.transient_state or service.active_state)
         return STATUS_LABELS.get(service.active_state, service.active_state)
 
+    def _status_key(self, service: RcloneService) -> str:
+        if self._transient_state_active(service):
+            return service.transient_state or service.active_state
+        return service.active_state
+
+    def _apply_status_decoration(self, item: QTableWidgetItem, service: RcloneService) -> None:
+        color = STATUS_COLORS.get(self._status_key(service), "#6b7280")
+        item.setData(Qt.ItemDataRole.DecorationRole, colored_dot_icon(color))
+
+    def _rc_status_key(self, service: RcloneService) -> str:
+        if service.rc_warning:
+            return "warning"
+        if not service.rc_enabled:
+            return "not_configured"
+        return service.rc_status
+
+    def _apply_rc_status_decoration(self, item: QTableWidgetItem, service: RcloneService) -> None:
+        color = RC_STATUS_COLORS.get(self._rc_status_key(service), "#9ca3af")
+        item.setData(Qt.ItemDataRole.DecorationRole, colored_dot_icon(color))
+
     def _error_tooltip(self, service: RcloneService) -> str:
         return "\n".join(
             [
@@ -497,6 +581,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, status)
         status.setText(self._status_label(service))
         status.setToolTip(service.transient_message or "Clic para acciones de estado")
+        self._apply_status_decoration(status, service)
 
         widget = self.table.cellWidget(row, 2)
         if not isinstance(widget, QLabel):
@@ -511,6 +596,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 3, api)
         api.setText(self._rc_status_label(service))
         api.setToolTip(self._rc_status_tooltip(service))
+        self._apply_rc_status_decoration(api, service)
 
         errors = self.table.item(row, 6)
         if errors is None:

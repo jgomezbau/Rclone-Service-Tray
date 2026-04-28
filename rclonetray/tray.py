@@ -1,27 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
 from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QPen, QPolygonF
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from rclonetray.icons import icon
-
-
-def app_icon() -> QIcon:
-    local_icon = Path(__file__).parent / "resources" / "icons" / "rclone-service-tray.svg"
-    if local_icon.exists():
-        local = QIcon(str(local_icon))
-        if not local.isNull():
-            return local
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(QColor("#2f7df6"))
-    painter = QPainter(pixmap)
-    painter.setPen(QColor("white"))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "R")
-    painter.end()
-    return QIcon(pixmap)
+from rclonetray.icons import app_icon, icon
 
 
 def compose_tray_icon(base_icon: QIcon, activity_state: str, has_error: bool, animation_frame: int) -> QIcon:

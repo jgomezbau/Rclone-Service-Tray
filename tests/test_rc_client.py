@@ -115,6 +115,22 @@ def test_idle_stats_return_idle() -> None:
     assert summary.state == "idle"
 
 
+def test_completed_transfer_counters_do_not_force_syncing() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 1044480,
+            "speed": 0,
+            "transfers": 1,
+            "totalTransfers": 1,
+            "transferring": [],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "idle"
+    assert summary.transfers_count == 1
+
+
 def test_core_stats_error_count_is_preserved() -> None:
     summary = activity_summary_from_stats({"bytes": 0, "speed": 0, "transfers": 0, "checks": 0, "errors": 3})
 

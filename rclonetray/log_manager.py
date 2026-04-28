@@ -29,12 +29,20 @@ URL_RE = re.compile(r"(https?://[^\s/]+(?:/[^\s]*)?)", re.I)
 RCLONE_OBJECT_RE = re.compile(r"\b(?:ERROR|CRITICAL|INFO|NOTICE|DEBUG)\s*:?\s+(.+?):\s+(.+)$", re.I)
 TEMP_PREFIXES = (".~", "~$")
 TEMP_SUFFIXES = (".tmp", ".lock")
+VFS_CACHE_ERROR_RE = re.compile(
+    r"(vfs cache: failed to open item|create cache file failed|open RW handle failed to open cache file|"
+    r"Non-out-of-space error encountered during open|\.cache/rclone/vfs/.*no such file or directory|"
+    r"no such file or directory.*\.cache/rclone/vfs/)",
+    re.I,
+)
+VFS_CACHE_PATH_RE = re.compile(r"(/[^\s:]*\.cache/rclone/vfs/[^\s:]+)", re.I)
 
 
 @dataclass
 class GroupedError:
     message: str
     severity: str
+    error_type: str
     file: str
     source: str
     count: int
@@ -54,9 +62,12 @@ class ErrorEntry:
     line: str
     severity: str = "critical"
     source: str = "log"
+    error_type: str = "Error crítico"
 
 
 def is_error_line(line: str) -> bool:
+    if VFS_CACHE_ERROR_RE.search(line):
+        return True
     if NON_ERROR_RE.search(line):
         return False
     return bool(ERROR_RE.search(line))
@@ -118,7 +129,7 @@ class LogManager:
         entries = [ErrorEntry(line, source="journalctl") for line in self.recent_journal_errors(service, 50)]
         file_lines = self.recent_file_lines(service.log_file, lines)
         entries.extend(
-            ErrorEntry(line, severity=classify_error_line(line, file_lines), source="log")
+            classify_error_entry(line, file_lines)
             for line in file_lines
             if is_error_line(line)
         )
@@ -146,6 +157,7 @@ class LogManager:
                                 "line": entry.line,
                                 "severity": entry.severity,
                                 "source": entry.source,
+                                "type": entry.error_type,
                             },
                             ensure_ascii=False,
                         )
@@ -179,11 +191,14 @@ class LogManager:
                     continue
                 severity = entry.get("severity")
                 source = entry.get("source")
+                error_type = entry.get("type")
                 if not isinstance(severity, str):
                     severity = "critical"
                 if not isinstance(source, str):
                     source = "log"
-                entries.append(ErrorEntry(stored_line, severity=severity, source=source))
+                if not isinstance(error_type, str):
+                    error_type = error_type_for_severity(severity)
+                entries.append(ErrorEntry(stored_line, severity=severity, source=source, error_type=error_type))
             return entries[-lines:]
         except OSError:
             return []
@@ -205,7 +220,7 @@ class LogManager:
         return [
             entry
             for entry in self.history_error_entries_for_service(service, lines, cleared_after)
-            if entry.severity not in {"warning_resolved", "resolved"}
+            if entry.severity not in {"warning", "minor_warning", "warning_resolved", "resolved"}
         ]
 
     def grouped_errors(self, lines: list[str] | list[ErrorEntry]) -> list[GroupedError]:
@@ -215,13 +230,17 @@ class LogManager:
             entry = raw if isinstance(raw, ErrorEntry) else ErrorEntry(raw)
             normalized = summarize_error_message(entry.line)
             file_path = extract_error_file(entry.line)
+            if is_vfs_cache_error(entry.line):
+                normalized = "VFS cache local inconsistente al abrir archivo"
+                file_path = extract_vfs_cache_error_file(entry.line) or file_path
             timestamp = parse_error_timestamp(entry.line)
             stamp = timestamp.isoformat(sep=" ", timespec="seconds") if timestamp is not None else None
-            key = f"{entry.severity}\0{normalized}\0{file_path}\0{entry.source}"
+            key = f"{entry.severity}\0{entry.error_type}\0{normalized}\0{file_path}\0{entry.source}"
             if key not in grouped:
                 grouped[key] = GroupedError(
                     normalized,
                     severity=entry.severity,
+                    error_type=entry.error_type,
                     file=file_path,
                     source=entry.source,
                     count=0,
@@ -232,6 +251,8 @@ class LogManager:
                 order.append(key)
             item = grouped[key]
             item.count += 1
+            if entry.line not in item.detail.splitlines():
+                item.detail += f"\n{entry.line}"
             if item.first_seen is None:
                 item.first_seen = stamp
             item.last_seen = stamp or item.last_seen
@@ -245,6 +266,7 @@ class LogManager:
         for item in grouped:
             meta = [
                 f"Severidad: {severity_label(item.severity)}",
+                f"Tipo: {item.error_type}",
                 f"Mensaje resumido: {item.message}",
                 f"Archivo: {item.file or '-'}",
                 f"Cantidad: {item.count}",
@@ -253,6 +275,8 @@ class LogManager:
                 meta.append(f"Primera vez: {item.first_seen}")
             if item.last_seen:
                 meta.append(f"Última vez: {item.last_seen}")
+            if item.severity in {"warning_resolved", "resolved"}:
+                meta.append(f"Estado: {item.severity}")
             meta.append(f"Fuente: {item.source}")
             chunks.append("\n".join(meta) + f"\nDetalle: {item.detail}")
         return "\n\n".join(chunks)
@@ -428,11 +452,35 @@ def split_rclone_object_message(line: str) -> tuple[str, str]:
     return "", normalized
 
 
+def classify_error_entry(line: str, context: list[str]) -> ErrorEntry:
+    severity = classify_error_line(line, context)
+    return ErrorEntry(line, severity=severity, source="log", error_type=error_type_for_line(line, severity))
+
+
 def classify_error_line(line: str, following_context: list[str]) -> str:
     file_path = extract_error_file(line)
     if is_temporary_file(file_path) and has_later_real_upload_success(file_path, line, following_context):
         return "warning_resolved"
+    if is_temporary_file(file_path):
+        return "warning"
+    if is_vfs_cache_error(line):
+        return "critical" if is_repeated_vfs_cache_error(line, following_context) else "warning"
     return "critical"
+
+
+def error_type_for_line(line: str, severity: str) -> str:
+    file_path = extract_error_file(line)
+    if is_temporary_file(file_path):
+        return "Archivo temporal de editor"
+    if is_vfs_cache_error(line):
+        return "VFS cache local inconsistente"
+    return error_type_for_severity(severity)
+
+
+def error_type_for_severity(severity: str) -> str:
+    if severity in {"warning", "minor_warning", "warning_resolved", "resolved"}:
+        return "Advertencia"
+    return "Error crítico"
 
 
 def is_temporary_file(path: str) -> bool:
@@ -469,6 +517,51 @@ def has_later_real_upload_success(temp_path: str, error_line: str, lines: list[s
         if re.search(r"upload succeeded|Copied \(new\)|Copied", line, re.I) and (real_path in line or real_name in line):
             return True
     return False
+
+
+def is_vfs_cache_error(line: str) -> bool:
+    return bool(VFS_CACHE_ERROR_RE.search(line))
+
+
+def extract_vfs_cache_error_file(line: str) -> str:
+    object_path = extract_error_file(line)
+    if object_path:
+        return real_file_for_cache_path(object_path)
+    match = VFS_CACHE_PATH_RE.search(line)
+    if not match:
+        return ""
+    return real_file_for_cache_path(match.group(1))
+
+
+def real_file_for_cache_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    if "/.cache/rclone/vfs/" in normalized:
+        normalized = normalized.split("/.cache/rclone/vfs/", 1)[1]
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 2:
+            return "/".join(parts[1:])
+        if parts:
+            return parts[0]
+    return Path(normalized).name
+
+
+def is_repeated_vfs_cache_error(line: str, lines: list[str]) -> bool:
+    target_file = extract_vfs_cache_error_file(line)
+    target_timestamp = parse_error_timestamp(line)
+    if not target_file or target_timestamp is None:
+        return False
+    repeats = 0
+    for candidate in lines:
+        if not is_vfs_cache_error(candidate):
+            continue
+        if extract_vfs_cache_error_file(candidate) != target_file:
+            continue
+        timestamp = parse_error_timestamp(candidate)
+        if timestamp is None:
+            continue
+        if abs((timestamp - target_timestamp).total_seconds()) <= 60:
+            repeats += 1
+    return repeats > 3
 
 
 def severity_label(severity: str) -> str:

@@ -36,9 +36,14 @@ class ActivityDetector:
     def detect(self, service: RcloneService) -> str:
         return self.get_activity_summary(service).state
 
-    def get_activity_summary(self, service: RcloneService) -> ActivitySummary:
+    def get_activity_summary(
+        self,
+        service: RcloneService,
+        since: dt.datetime | None = None,
+        max_age_seconds: int | None = None,
+    ) -> ActivitySummary:
         lines = self.logs.recent_file_lines(service.log_file, 80)
-        recent_lines = [line for line in lines[-40:] if self._is_recent(line)]
+        recent_lines = [line for line in lines[-40:] if self._is_recent(line, since=since, max_age_seconds=max_age_seconds)]
 
         activity = "idle"
         has_explicit_activity_signal = False
@@ -60,12 +65,15 @@ class ActivityDetector:
         lines = self.logs.recent_file_lines(service.log_file, 120)
         return lines[-80:]
 
-    def _is_recent(self, line: str) -> bool:
+    def _is_recent(self, line: str, since: dt.datetime | None = None, max_age_seconds: int | None = None) -> bool:
         timestamp = parse_rclone_timestamp(line)
         if timestamp is None:
             return False
+        if since is not None and timestamp < since:
+            return False
         age = self._now() - timestamp
-        return dt.timedelta(seconds=0) <= age <= dt.timedelta(seconds=self.activity_window_seconds)
+        window = self.activity_window_seconds if max_age_seconds is None else max_age_seconds
+        return dt.timedelta(seconds=0) <= age <= dt.timedelta(seconds=window)
 
     def _activity_for_line(self, line: str) -> str | None:
         if CLEANED_IDLE_RE.search(line):

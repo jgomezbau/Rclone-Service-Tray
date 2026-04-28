@@ -127,7 +127,7 @@ def _state_from_stats(
     transfers_count: int = 0,
     checks_count: int = 0,
 ) -> str:
-    if not transferring and not checking and transfers_count == 0 and checks_count == 0 and speed == 0:
+    if not transferring and not checking and speed == 0:
         return "idle"
     if transferring:
         text = " ".join(str(item) for item in transferring).lower()
@@ -138,7 +138,7 @@ def _state_from_stats(
         return "syncing" if speed > 0 else "syncing"
     if checking:
         return "syncing"
-    if transfers_count > 0 or checks_count > 0 or speed > 0:
+    if speed > 0:
         return "syncing"
     return "idle"
 

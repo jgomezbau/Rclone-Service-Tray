@@ -512,7 +512,14 @@ En Debian Trixie o Ubuntu reciente:
 
 ```bash
 sudo apt update
-sudo apt install python3 rclone systemd
+sudo apt install python3 systemd
+```
+
+Instala `rclone` aparte. Para remotos como Mega se recomienda el binario oficial de rclone, porque algunos paquetes de distribucion pueden compilarse sin ciertos backends:
+
+```bash
+curl https://rclone.org/install.sh | sudo bash
+rclone help backend mega
 ```
 
 Si usas el Python del sistema, instala tambien PySide6 por tu metodo habitual. En entorno virtual:
@@ -543,7 +550,7 @@ python3 -m rclonetray
 Construir `.deb`:
 
 ```bash
-scripts/build_deb.sh
+VERSION=1.0.0 scripts/build_deb.sh
 ```
 
 Instalar:
@@ -552,10 +559,12 @@ Instalar:
 sudo apt install ./dist/rclone-service-tray_1.0.0_all.deb
 ```
 
+El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria para evitar reemplazar una instalacion oficial de rclone por el paquete de la distribucion.
+
 Construir AppImage:
 
 ```bash
-scripts/build_appimage.sh
+VERSION=1.0.0 scripts/build_appimage.sh
 ```
 
 Si `appimagetool` existe, el resultado esperado es:
@@ -563,6 +572,36 @@ Si `appimagetool` existe, el resultado esperado es:
 ```text
 dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
 ```
+
+Ejecutar AppImage:
+
+```bash
+chmod +x dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
+./dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
+```
+
+Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fallback para revisar el contenido.
+
+Construir todo:
+
+```bash
+VERSION=1.0.0 scripts/build_all.sh
+```
+
+## Publicar release
+
+El workflow `.github/workflows/release.yml` publica automaticamente los artefactos de `dist/` al crear un tag `v*`.
+
+Flujo recomendado:
+
+```bash
+pytest
+VERSION=1.0.0 scripts/build_all.sh
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
+```
+
+GitHub Actions vuelve a ejecutar los tests, construye el `.deb` y el AppImage, y los adjunta a la release.
 
 ## Ejemplo de servicio compatible
 

@@ -103,6 +103,70 @@ def test_rc_idle_dominates_recent_upload_logs(tmp_path: Path) -> None:
     assert service.activity_source == "rc"
 
 
+def test_app_start_with_old_upload_log_and_rc_idle_stays_idle(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text("2026/04/28 10:00:01 INFO  : file.txt: upload succeeded", encoding="utf-8")
+    service = RcloneService(
+        name="rclone-Google-Drive.service",
+        path=tmp_path / "rclone-Google-Drive.service",
+        log_file=log_file,
+        rc_enabled=True,
+        rc_status="active",
+        activity_summary=ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0),
+    )
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path)  # type: ignore[arg-type]
+    window = MainWindow.__new__(MainWindow)
+    window.app_started_at = dt.datetime(2026, 4, 28, 10, 0, 5)
+    window.activity = ActivityDetector(logs, activity_window_seconds=60, now=lambda: dt.datetime(2026, 4, 28, 10, 0, 6))
+    window._request_rc_summary = lambda _service: None
+
+    window._update_service_activity(service)
+
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+
+
+def test_expired_activity_pulse_with_rc_idle_returns_idle(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-Google-Drive.service")
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "pulse"
+    service.activity_until = dt.datetime.now() - dt.timedelta(seconds=1)
+    service.activity_reason = "log"
+    service.activity_summary = ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0)
+    window = MainWindow.__new__(MainWindow)
+
+    window._check_transient_expiry(service)
+
+    assert service.activity_until is None
+    assert service.activity_reason is None
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+
+
+def test_apply_rc_idle_clears_expired_pulse(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-Google-Drive.service")
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "pulse"
+    service.activity_until = dt.datetime.now() - dt.timedelta(seconds=1)
+    service.activity_reason = "log"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(service.name, ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0))
+
+    assert service.activity_until is None
+    assert service.activity_reason is None
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+
+
 def test_old_error_before_last_clear_time_does_not_mark_visual_error(tmp_path: Path) -> None:
     history = tmp_path / "errors.jsonl"
     history.write_text(
@@ -118,6 +182,27 @@ def test_old_error_before_last_clear_time_does_not_mark_visual_error(tmp_path: P
     window._refresh_error_state(service)
 
     assert service.error_count_history == 0
+    assert not service.recent_error
+
+
+def test_warning_history_does_not_mark_visual_error_when_service_and_rc_are_ok(tmp_path: Path) -> None:
+    history = tmp_path / "errors.jsonl"
+    history.write_text(
+        '{"service": "rclone-Test.service", "line": "2026/04/28 10:00:00 ERROR : ~$file.docx: Failed to copy: context canceled", "severity": "warning", "type": "Archivo temporal de editor"}\n',
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path)
+    service.active_state = "active"
+    service.rc_error_count = 0
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=history)  # type: ignore[arg-type]
+    window = MainWindow.__new__(MainWindow)
+    window.logs = logs
+    window.config = AppConfig()
+
+    window._refresh_error_state(service)
+
+    assert service.error_count_history == 0
+    assert service.recent_errors == 0
     assert not service.recent_error
 
 
@@ -142,10 +227,10 @@ def test_restart_service_sets_transient_and_processes_events_before_systemctl(tm
 
     window.restart_service(service)
 
-    assert systemd.restart_seen_text == "🟡 Reiniciando"
+    assert systemd.restart_seen_text == "Reiniciando"
     assert systemd.events.index("set:restarting") < systemd.events.index(f"restart:{service.name}")
     assert systemd.events.index("process") < systemd.events.index(f"restart:{service.name}")
-    assert window.table.item(0, 1).text() == "🟢 Activo"
+    assert window.table.item(0, 1).text() == "Activo"
     assert tray.calls >= 2
 
 
@@ -186,8 +271,9 @@ def test_restart_updates_tray_before_and_after_restart(tmp_path: Path, monkeypat
 
     window.restart_service(service)
 
-    assert any(snapshot[0][2] == "restarting" for snapshot in tray.snapshots)
-    assert tray.snapshots[-1][0][2] is None
+    service_snapshots = [snapshot for snapshot in tray.snapshots if snapshot]
+    assert any(snapshot[0][2] == "restarting" for snapshot in service_snapshots)
+    assert service_snapshots[-1][0][2] is None
 
 
 def test_clearing_errors_updates_tray(tmp_path: Path, monkeypatch) -> None:

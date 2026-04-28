@@ -20,6 +20,8 @@ class RcloneService:
     transient_message: str | None = None
     transient_until: Any | None = None
     activity: str = "idle"
+    activity_until: Any | None = None
+    activity_reason: str | None = None
     cache_path: Path | None = None
     cache_size: int | None = None
     cache_files: int | None = None
