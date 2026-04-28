@@ -10,7 +10,7 @@
 
 La app detecta servicios `rclone-*.service`, interpreta su `ExecStart`, muestra estado, actividad, punto de montaje, espacio local usado, errores detectados por la app y un menu contextual por remoto.
 
-> **Disclaimer:** este proyecto administra servicios y archivos locales de `rclone` en tu sesion de usuario. No usa `sudo` ni modifica datos del cloud, pero acciones como `Liberar espacio en disco`, `Limpiar logs` o editar un `.service` pueden afectar montajes activos, archivos locales cacheados y configuraciones de usuario. Revise las rutas configuradas y los backups antes de usarlo en entornos criticos.
+> **Disclaimer:** este proyecto es independiente y no tiene relacion, afiliacion, patrocinio ni respaldo oficial de `rclone` o sus mantenedores. La app administra servicios y archivos locales de `rclone` en tu sesion de usuario. No usa `sudo` ni modifica datos del cloud, pero acciones como `Liberar espacio en disco`, `Limpiar logs` o editar un `.service` pueden afectar montajes activos, archivos locales cacheados y configuraciones de usuario. Revise las rutas configuradas y los backups antes de usarlo en entornos criticos.
 
 Pensada para entornos como:
 
@@ -23,12 +23,12 @@ Pensada para entornos como:
 
 ## Vista general
 
-| Remoto | Estado | Actividad | Punto de montaje | Espacio | Errores | Menu |
-| --- | --- | --- | --- | ---: | ---: | --- |
-| Google-Drive | Activo | Inactivo | `/home/usuario/CloudDrives/Google-Drive` | 2.4 GB | 0 | `⋮` |
-| OneDrive-Personal | Activo | Subiendo | `/home/usuario/CloudDrives/OneDrive-Personal` | 850 MB | 0 | `⋮` |
-| Nextcloud | Con errores | Error reciente | `/home/usuario/CloudDrives/Nextcloud` | 120 MB | 1 | `⋮` |
-| Dropbox | Detenido | Inactivo | `/home/usuario/CloudDrives/Dropbox` | 0 B | 0 | `⋮` |
+| Remoto | Estado | Actividad | API | Punto de montaje | Espacio | Errores | Menu |
+| --- | --- | --- | --- | --- | ---: | ---: | --- |
+| Google-Drive | Activo | Inactivo | RC activo | `/home/usuario/CloudDrives/Google-Drive` | 2.4 GB | 0 | `⋮` |
+| OneDrive-Personal | Activo | Subiendo | RC activo | `/home/usuario/CloudDrives/OneDrive-Personal` | 850 MB | 0 | `⋮` |
+| Nextcloud | Con errores | Error reciente | No responde | `/home/usuario/CloudDrives/Nextcloud` | 120 MB | 1 | `⋮` |
+| Dropbox | Detenido | Inactivo | No configurado | `/home/usuario/CloudDrives/Dropbox` | 0 B | 0 | `⋮` |
 
 Desde el tray puedes:
 
@@ -101,7 +101,15 @@ Todos los menus usan iconos consistentes con `QIcon.fromTheme()` y fallback loca
 
 ### Actividad reciente
 
-La actividad se estima leyendo logs de rclone con ventana temporal configurable.
+La actividad usa `rclone RC/API` como fuente principal cuando el servicio tiene `--rc` configurado y responde. Si RC no esta configurado, o no responde, la app mantiene la deteccion por logs como fallback.
+
+Prioridad de fuente:
+
+1. RC/API disponible
+2. Logs recientes
+3. Sin actividad
+
+Cuando la fuente es logs:
 
 - Se parsean timestamps con formato `YYYY/MM/DD HH:MM:SS`.
 - La actividad solo cuenta si ocurrio dentro de `activity_window_seconds`.
@@ -124,6 +132,67 @@ La columna `Actividad` se anima con un `QTimer` ligero:
 - `Liberando espacio`: spinner simple
 - `Error reciente`: icono estatico
 - `Inactivo`: nube estatica
+
+### Actividad en tiempo real con rclone RC/API
+
+RC/API es opcional. Si un servicio tiene `--rc`, Rclone Service Tray intenta consultar:
+
+- `rc/noop`
+- `core/version`
+- `core/stats`
+
+La app usa `core/stats` para obtener actividad actual:
+
+- transferencias activas
+- checks activos
+- bytes transferidos
+- total estimado
+- velocidad
+- archivos activos cuando rclone los expone
+
+Ejemplo seguro por servicio:
+
+```ini
+ExecStart=/usr/bin/rclone mount \
+  --vfs-cache-mode full \
+  --log-file /home/usuario/.cache/rclone/Google-Drive.log \
+  --rc \
+  --rc-addr 127.0.0.1:5573 \
+  --rc-no-auth \
+  Google-Drive: /home/usuario/CloudDrives/Google-Drive
+```
+
+Use un puerto distinto por servicio:
+
+| Remoto | Puerto sugerido |
+| --- | ---: |
+| Google Drive | 5573 |
+| OneDrive Personal | 5574 |
+| Dropbox | 5575 |
+| Mega | 5576 |
+| Nextcloud | 5577 |
+
+Reglas de seguridad:
+
+- Se recomienda siempre `127.0.0.1`.
+- No se recomienda `0.0.0.0`.
+- Si se detecta `0.0.0.0`, la UI muestra una advertencia porque RC podria quedar expuesto a la red.
+- Si se usa `--rc-user` y `--rc-pass`, la app prepara Basic Auth y no muestra la contraseña en claro.
+- Los logs siguen siendo la fuente para errores, diagnostico historico y auditoria.
+
+En la pantalla principal, la columna `API` muestra:
+
+- `RC activo`
+- `No configurado`
+- `No responde`
+- `Inseguro`
+
+En Ajustes -> Servicios -> Detalle se puede:
+
+- ver si RC fue detectado
+- ver direccion y URL
+- probar conexion RC
+- generar una sugerencia de configuracion RC con puerto recomendado
 
 ### Errores
 
@@ -279,10 +348,11 @@ El icono del tray mantiene el icono base de nube de la aplicacion y compone over
 Prioridad global:
 
 1. Error
-2. Upload
-3. Download
-4. Sync
-5. Idle
+2. Upload activo por RC
+3. Download activo por RC
+4. Sync activo por RC
+5. Actividad estimada por logs
+6. Idle
 
 Estados visuales:
 
@@ -313,6 +383,9 @@ La ventana de Ajustes se organiza en:
 Funciones destacadas:
 
 - Servicios detectados con checkbox `Activo en Rclone Service Tray`
+- Detalle RC/API por servicio
+- Prueba de conexion RC
+- Sugerencia de configuracion RC con puerto recomendado
 - Boton `Ignorar`
 - Boton `Restaurar ignorados`
 - Seleccion de carpetas para systemd, montajes, archivos locales y logs

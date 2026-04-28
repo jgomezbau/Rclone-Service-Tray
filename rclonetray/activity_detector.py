@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 
 from rclonetray.log_manager import LogManager
+from rclonetray.rc_client import ActivitySummary
 from rclonetray.service_model import RcloneService
 
 
@@ -33,6 +34,9 @@ class ActivityDetector:
         self._now = now or dt.datetime.now
 
     def detect(self, service: RcloneService) -> str:
+        return self.get_activity_summary(service).state
+
+    def get_activity_summary(self, service: RcloneService) -> ActivitySummary:
         lines = self.logs.recent_file_lines(service.log_file, 80)
         recent_lines = [line for line in lines[-40:] if self._is_recent(line)]
 
@@ -44,13 +48,13 @@ class ActivityDetector:
                 has_explicit_activity_signal = True
                 activity = line_activity
         if has_explicit_activity_signal:
-            return activity
+            return ActivitySummary(state=activity, source="logs")
 
         text = "\n".join(recent_lines)
         for name, pattern in PATTERNS:
             if pattern.search(text):
-                return name
-        return "idle"
+                return ActivitySummary(state=name, source="logs")
+        return ActivitySummary(state="idle", source="logs")
 
     def relevant_lines(self, service: RcloneService) -> list[str]:
         lines = self.logs.recent_file_lines(service.log_file, 120)
@@ -83,3 +87,13 @@ def parse_rclone_timestamp(line: str) -> dt.datetime | None:
         return dt.datetime.strptime(match.group("timestamp"), "%Y/%m/%d %H:%M:%S")
     except ValueError:
         return None
+
+
+def select_activity_summary(
+    service: RcloneService,
+    rc_summary: ActivitySummary | None,
+    log_summary: ActivitySummary,
+) -> ActivitySummary:
+    if service.rc_enabled and rc_summary is not None and rc_summary.source == "rc" and rc_summary.state != "unavailable":
+        return rc_summary
+    return log_summary

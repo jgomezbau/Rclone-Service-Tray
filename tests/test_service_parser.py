@@ -21,6 +21,9 @@ ExecStart=/usr/bin/rclone mount Google-Drive: /home/user/CloudDrives/Google-Driv
     assert parsed.log_file == Path("/home/user/.cache/rclone/google.log")
     assert parsed.flags["--vfs-cache-mode"] == "full"
     assert parsed.flags["--rc"] is True
+    assert parsed.rc_enabled is True
+    assert parsed.rc_addr == "127.0.0.1:5572"
+    assert parsed.rc_url == "http://127.0.0.1:5572"
 
 
 def test_parse_multiline_exec_start_with_flags_before_remote(tmp_path: Path) -> None:
@@ -72,6 +75,63 @@ ExecStart=/usr/bin/rclone mount --config /home/user/.config/rclone/rclone.conf -
     assert parsed.flags["--rc"] is True
     assert parsed.flags["--rc-no-auth"] is True
     assert parsed.flags["--rc-addr"] == "127.0.0.1:5572"
+    assert parsed.rc_enabled is True
+    assert parsed.rc_auth_enabled is False
+    assert parsed.rc_url == "http://127.0.0.1:5572"
+
+
+def test_parse_rc_addr_equals_form(tmp_path: Path) -> None:
+    service = tmp_path / "rclone-Rc.service"
+    service.write_text(
+        """
+[Service]
+ExecStart=/usr/bin/rclone mount --rc --rc-addr=127.0.0.1:5573 Remote: /mnt/remote
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_service_file(service)
+
+    assert parsed.rc_enabled is True
+    assert parsed.rc_addr == "127.0.0.1:5573"
+    assert parsed.rc_url == "http://127.0.0.1:5573"
+
+
+def test_parse_rc_default_addr_when_missing(tmp_path: Path) -> None:
+    service = tmp_path / "rclone-Rc.service"
+    service.write_text("[Service]\nExecStart=/usr/bin/rclone mount --rc Remote: /mnt/remote\n", encoding="utf-8")
+
+    parsed = parse_service_file(service)
+
+    assert parsed.rc_enabled is True
+    assert parsed.rc_addr == "localhost:5572"
+    assert parsed.rc_url == "http://localhost:5572"
+
+
+def test_parse_rc_auth_user_and_password(tmp_path: Path) -> None:
+    service = tmp_path / "rclone-Rc.service"
+    service.write_text(
+        "[Service]\nExecStart=/usr/bin/rclone mount --rc --rc-user admin --rc-pass secret Remote: /mnt/remote\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_service_file(service)
+
+    assert parsed.rc_auth_enabled is True
+    assert parsed.rc_user == "admin"
+    assert parsed.rc_pass == "secret"
+    assert parsed.rc_password_display == "********"
+
+
+def test_parse_rc_warns_on_unsafe_addr(tmp_path: Path) -> None:
+    service = tmp_path / "rclone-Rc.service"
+    service.write_text("[Service]\nExecStart=/usr/bin/rclone mount --rc --rc-addr 0.0.0.0:5572 Remote: /mnt/remote\n", encoding="utf-8")
+
+    parsed = parse_service_file(service)
+
+    assert parsed.rc_enabled is True
+    assert parsed.rc_warning is not None
+    assert "127.0.0.1" in parsed.rc_warning
 
 
 def test_load_services_excludes_ignored_services(tmp_path: Path) -> None:

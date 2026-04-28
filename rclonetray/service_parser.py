@@ -27,12 +27,15 @@ RCLONE_VALUE_FLAGS = {
     "--drive-pacer-min-sleep",
     "--drive-pacer-burst",
     "--rc-addr",
+    "--rc-user",
+    "--rc-pass",
 }
 
 RCLONE_BOOLEAN_FLAGS = {
     "--allow-other",
     "--rc",
     "--rc-no-auth",
+    "--rc-web-gui",
 }
 
 
@@ -111,6 +114,43 @@ def _parse_exec_start(service: RcloneService, exec_start: str) -> None:
     log_file = service.flags.get("--log-file")
     if isinstance(log_file, str):
         service.log_file = Path(log_file).expanduser()
+    _parse_rc_config(service)
+
+
+def _parse_rc_config(service: RcloneService) -> None:
+    service.rc_enabled = bool(service.flags.get("--rc"))
+    if not service.rc_enabled:
+        service.rc_addr = None
+        service.rc_url = None
+        service.rc_auth_enabled = True
+        service.rc_user = None
+        service.rc_pass = None
+        service.rc_status = "not_configured"
+        service.rc_warning = None
+        return
+
+    raw_addr = service.flags.get("--rc-addr")
+    service.rc_addr = raw_addr if isinstance(raw_addr, str) and raw_addr else "localhost:5572"
+    service.rc_url = _rc_url_for_addr(service.rc_addr)
+    service.rc_auth_enabled = not bool(service.flags.get("--rc-no-auth"))
+    rc_user = service.flags.get("--rc-user")
+    rc_pass = service.flags.get("--rc-pass")
+    service.rc_user = rc_user if isinstance(rc_user, str) else None
+    service.rc_pass = rc_pass if isinstance(rc_pass, str) else None
+    service.rc_status = "unknown"
+    service.rc_warning = (
+        "Advertencia: la API RC podría estar expuesta a la red. Se recomienda usar 127.0.0.1."
+        if service.rc_addr.startswith("0.0.0.0")
+        else None
+    )
+
+
+def _rc_url_for_addr(addr: str) -> str:
+    if addr.startswith("http://") or addr.startswith("https://"):
+        return addr.rstrip("/")
+    if addr.startswith(":"):
+        return f"http://localhost{addr}"
+    return f"http://{addr}".rstrip("/")
 
 
 def _find_mount_index(parts: list[str]) -> int | None:

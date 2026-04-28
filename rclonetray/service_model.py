@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -23,6 +24,17 @@ class RcloneService:
     recent_errors: int = 0
     last_error: str | None = None
     recent_error: bool = False
+    rc_enabled: bool = False
+    rc_addr: str | None = None
+    rc_url: str | None = None
+    rc_auth_enabled: bool = True
+    rc_user: str | None = None
+    rc_pass: str | None = None
+    rc_status: str = "not_configured"
+    rc_last_check: str | None = None
+    rc_warning: str | None = None
+    activity_source: str = "logs"
+    activity_summary: Any | None = None
 
     @property
     def display_name(self) -> str:
@@ -39,3 +51,7 @@ class RcloneService:
     def is_webdav_like(self) -> bool:
         text = f"{self.exec_start} {self.remote} {self.display_name}".lower()
         return "webdav" in text or "nextcloud" in text
+
+    @property
+    def rc_password_display(self) -> str:
+        return "********" if self.rc_pass else ""

@@ -1,8 +1,9 @@
 import datetime as dt
 from pathlib import Path
 
-from rclonetray.activity_detector import ActivityDetector
+from rclonetray.activity_detector import ActivityDetector, select_activity_summary
 from rclonetray.log_manager import LogManager
+from rclonetray.rc_client import ActivitySummary
 from rclonetray.service_model import RcloneService
 from rclonetray.systemd_manager import CommandResult
 
@@ -53,3 +54,52 @@ def test_old_upload_and_recent_cleaned_zero_uploads_marks_idle(tmp_path: Path) -
         )
         == "idle"
     )
+
+
+def test_log_activity_summary_marks_source_logs(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text("2026/04/28 13:31:04 INFO  : file.txt: upload succeeded", encoding="utf-8")
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", log_file=log_file)
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    detector = ActivityDetector(logs, activity_window_seconds=60, now=lambda: NOW)
+
+    summary = detector.get_activity_summary(service)
+
+    assert summary.state == "uploading"
+    assert summary.source == "logs"
+
+
+def test_rc_idle_takes_priority_over_log_upload(tmp_path: Path) -> None:
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", rc_enabled=True)
+    selected = select_activity_summary(
+        service,
+        ActivitySummary(state="idle", source="rc"),
+        ActivitySummary(state="uploading", source="logs"),
+    )
+
+    assert selected.state == "idle"
+    assert selected.source == "rc"
+
+
+def test_rc_unavailable_falls_back_to_logs(tmp_path: Path) -> None:
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", rc_enabled=True)
+    selected = select_activity_summary(
+        service,
+        ActivitySummary(state="unavailable", source="rc"),
+        ActivitySummary(state="uploading", source="logs"),
+    )
+
+    assert selected.state == "uploading"
+    assert selected.source == "logs"
+
+
+def test_without_rc_uses_logs(tmp_path: Path) -> None:
+    service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", rc_enabled=False)
+    selected = select_activity_summary(
+        service,
+        ActivitySummary(state="uploading", source="rc"),
+        ActivitySummary(state="idle", source="logs"),
+    )
+
+    assert selected.state == "idle"
+    assert selected.source == "logs"

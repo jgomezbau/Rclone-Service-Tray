@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialogButtonBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from rclonetray.config import AppConfig, save_config
 from rclonetray.icons import icon
+from rclonetray.rc_client import RcloneRcClient
 from rclonetray.service_model import RcloneService
 from rclonetray.service_parser import load_services
 from rclonetray.systemd_manager import SystemdManager
@@ -67,8 +69,8 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(tab)
         layout.addWidget(QLabel("Servicios detectados:"))
         self.service_checks: dict[str, QCheckBox] = {}
-        table = QTableWidget(0, 4)
-        table.setHorizontalHeaderLabels(["Servicio", "Ruta", "Activo en Rclone Service Tray", "Acción"])
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["Servicio", "Ruta", "Activo en Rclone Service Tray", "RC/API", "Acción"])
         table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -81,15 +83,20 @@ class SettingsWindow(QDialog):
             active = QCheckBox()
             active.setChecked(service.name not in self.config.ignored_services)
             self.service_checks[service.name] = active
+            rc_detail = QPushButton("Detalle")
+            rc_detail.setIcon(icon("network-server", "dialog-information"))
+            rc_detail.clicked.connect(lambda _, s=service, port=self._suggested_rc_port(service, detected): RcServiceDetailDialog(s, port, self).exec())
             ignore = QPushButton("Ignorar")
             ignore.setIcon(icon("list-remove", "edit-delete"))
             ignore.clicked.connect(lambda _, name=service.name, checkbox=active: self._ignore_service(name, checkbox))
             table.setCellWidget(row, 2, active)
-            table.setCellWidget(row, 3, ignore)
+            table.setCellWidget(row, 3, rc_detail)
+            table.setCellWidget(row, 4, ignore)
         table.resizeColumnsToContents()
         table.setColumnWidth(0, min(max(table.columnWidth(0), 180), 260))
         table.setColumnWidth(2, 190)
-        table.setColumnWidth(3, 110)
+        table.setColumnWidth(3, 100)
+        table.setColumnWidth(4, 110)
         layout.addWidget(table)
         add = QPushButton("Agregar archivo .service manualmente")
         add.setIcon(icon("list-add"))
@@ -208,6 +215,12 @@ class SettingsWindow(QDialog):
     def _detected_services_for_settings(self) -> list[RcloneService]:
         return load_services(Path(self.config.systemd_user_dir), self.config.services, ignored_services=[])
 
+    def _suggested_rc_port(self, service: RcloneService, services: list[RcloneService]) -> int:
+        try:
+            return 5573 + services.index(service)
+        except ValueError:
+            return 5573
+
     def _ignore_service(self, name: str, checkbox: QCheckBox) -> None:
         checkbox.setChecked(False)
         if name not in self.config.ignored_services:
@@ -267,3 +280,63 @@ class SettingsWindow(QDialog):
         save_config(self.config)
         self.config_changed.emit()
         QMessageBox.information(self, "Ajustes", "Ajustes guardados.")
+
+
+class RcServiceDetailDialog(QDialog):
+    def __init__(self, service: RcloneService, suggested_port: int, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.suggested_port = suggested_port
+        self.setWindowTitle(f"Rclone RC/API - {service.display_name}")
+        self.resize(640, 420)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.addRow("RC detectado", QLabel("Sí" if service.rc_enabled else "No"))
+        form.addRow("Dirección", QLabel(service.rc_addr or "-"))
+        form.addRow("URL", QLabel(service.rc_url or "-"))
+        form.addRow("Estado", QLabel(service.rc_status))
+        form.addRow("Usuario", QLabel(service.rc_user or "-"))
+        form.addRow("Contraseña", QLabel(service.rc_password_display or "-"))
+        auth = "desactivada (--rc-no-auth)" if not service.rc_auth_enabled else "activada"
+        form.addRow("Autenticación", QLabel(auth))
+        if service.rc_warning:
+            warning = QLabel(service.rc_warning)
+            warning.setWordWrap(True)
+            form.addRow("Advertencia", warning)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        test = QPushButton("Probar conexión RC")
+        test.setIcon(icon("network-connect", "dialog-ok"))
+        suggest = QPushButton("Sugerir configuración RC")
+        suggest.setIcon(icon("document-edit"))
+        test.clicked.connect(self._test_connection)
+        suggest.clicked.connect(self._show_suggestion)
+        buttons.addWidget(test)
+        buttons.addWidget(suggest)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.reject)
+        layout.addWidget(close)
+
+    def _test_connection(self) -> None:
+        if not self.service.rc_enabled:
+            QMessageBox.information(self, "RC/API", "Este servicio no tiene --rc configurado.")
+            return
+        client = RcloneRcClient(self.service, timeout=1.0)
+        if client.is_available():
+            QMessageBox.information(self, "RC/API", "Conexión RC disponible.")
+        else:
+            QMessageBox.warning(self, "RC/API", "RC no responde o no está disponible.")
+
+    def _show_suggestion(self) -> None:
+        text = (
+            "Para habilitar actividad en tiempo real, agregue a ExecStart:\n\n"
+            "--rc \\\n"
+            f"--rc-addr 127.0.0.1:{self.suggested_port} \\\n"
+            "--rc-no-auth \\\n\n"
+            "Use un puerto distinto por servicio. Se recomienda 127.0.0.1; no use 0.0.0.0 salvo que entienda el riesgo de exponer la API RC a la red."
+        )
+        QMessageBox.information(self, "Sugerir configuración RC", text)
