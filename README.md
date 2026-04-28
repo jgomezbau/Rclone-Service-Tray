@@ -27,14 +27,14 @@ Pensada para entornos como:
 | --- | --- | --- | --- | --- | ---: | ---: | --- |
 | Google-Drive | Activo | Inactivo | RC activo | `/home/usuario/CloudDrives/Google-Drive` | 2.4 GB | 0 | `⋮` |
 | OneDrive-Personal | Activo | Subiendo | RC activo | `/home/usuario/CloudDrives/OneDrive-Personal` | 850 MB | 0 | `⋮` |
-| Nextcloud | Con errores | Error reciente | No responde | `/home/usuario/CloudDrives/Nextcloud` | 120 MB | 1 | `⋮` |
+| Nextcloud | Con errores | Inactivo | No responde | `/home/usuario/CloudDrives/Nextcloud` | 120 MB | 1 | `⋮` |
 | Dropbox | Detenido | Inactivo | No configurado | `/home/usuario/CloudDrives/Dropbox` | 0 B | 0 | `⋮` |
 
 Desde el tray puedes:
 
 - Abrir u ocultar la ventana principal.
 - Reiniciar todos los servicios visibles.
-- Ver errores recientes desde logs originales.
+- Ver errores recientes agrupados por severidad, archivo y fuente.
 - Liberar espacio en disco para todos los remotos visibles.
 - Abrir ajustes.
 - Salir de la aplicacion.
@@ -99,21 +99,53 @@ La UI separa acciones de estado y acciones completas:
 
 Todos los menus usan iconos consistentes con `QIcon.fromTheme()` y fallback local.
 
+### Estados transitorios
+
+Las acciones `Iniciar`, `Detener`, `Reiniciar` y `Reiniciar todos` actualizan la UI inmediatamente antes de ejecutar `systemctl`.
+
+Estados transitorios:
+
+- Iniciar: `🔵 Montando`
+- Detener: `🟡 Deteniendo`
+- Reiniciar: `🟡 Reiniciando`
+
+Durante un estado transitorio:
+
+- `transient_state` tiene prioridad visual sobre `active_state`.
+- `transient_message` aparece como tooltip de la fila.
+- `transient_until` expira a los 20 segundos.
+- La actividad se muestra como sincronizacion transitoria.
+- Se repinta la fila, se actualiza el tray y se procesa la cola de Qt antes de ejecutar `systemctl --user`.
+
+Despues del comando, la app consulta `systemd.show_state(service.name)`, limpia el estado transitorio, repinta la fila y vuelve a actualizar el tray.
+
 ### Actividad reciente
 
-La actividad usa `rclone RC/API` como fuente principal cuando el servicio tiene `--rc` configurado y responde. Si RC no esta configurado, o no responde, la app mantiene la deteccion por logs como fallback.
+La actividad usa `rclone RC/API` como fuente principal cuando el servicio tiene `--rc` configurado y responde. Si RC esta disponible, los logs no se usan para decidir la columna `Actividad`, aunque existan lineas recientes como `queuing for upload`, `upload succeeded`, `Copied` o `Failed to copy`.
+
+Si RC no esta configurado, o no responde, la app mantiene la deteccion por logs como fallback.
 
 Prioridad de fuente:
 
 1. RC/API disponible
-2. Logs recientes
+2. Logs recientes solo si RC no esta configurado o no responde
 3. Sin actividad
+
+Cuando RC/API esta disponible:
+
+- La fuente visual es `RC/API`.
+- La app consulta `core/stats`.
+- Si `transfers=0`, `speed=0` y `checks=0`, se muestra `Inactivo`.
+- El tooltip de actividad indica `Actividad en tiempo real desde RC/API`.
+- El modal de actividad muestra el estado actual de RC y una seccion separada `Eventos recientes del log`.
+- Los eventos del log se muestran solo como contexto; no cambian la actividad actual.
 
 Cuando la fuente es logs:
 
 - Se parsean timestamps con formato `YYYY/MM/DD HH:MM:SS`.
 - La actividad solo cuenta si ocurrio dentro de `activity_window_seconds`.
 - Una linea `vfs cache: cleaned ... to upload 0, uploading 0` fuerza estado inactivo.
+- El tooltip de actividad indica `Actividad estimada desde logs`.
 - Estados detectados:
   - `idle`
   - `uploading`
@@ -122,7 +154,6 @@ Cuando la fuente es logs:
   - `reading`
   - `writing`
   - `cleaning`
-  - `error`
 
 La columna `Actividad` se anima con un `QTimer` ligero:
 
@@ -130,7 +161,6 @@ La columna `Actividad` se anima con un `QTimer` ligero:
 - `Descargando`: alternancia de flechas
 - `Sincronizando`: spinner simple
 - `Liberando espacio`: spinner simple
-- `Error reciente`: icono estatico
 - `Inactivo`: nube estatica
 
 ### Actividad en tiempo real con rclone RC/API
@@ -145,6 +175,7 @@ La app usa `core/stats` para obtener actividad actual:
 
 - transferencias activas
 - checks activos
+- contador `errors`
 - bytes transferidos
 - total estimado
 - velocidad
@@ -178,7 +209,8 @@ Reglas de seguridad:
 - No se recomienda `0.0.0.0`.
 - Si se detecta `0.0.0.0`, la UI muestra una advertencia porque RC podria quedar expuesto a la red.
 - Si se usa `--rc-user` y `--rc-pass`, la app prepara Basic Auth y no muestra la contraseña en claro.
-- Los logs siguen siendo la fuente para errores, diagnostico historico y auditoria.
+- Los logs siguen siendo la fuente para diagnostico historico y auditoria.
+- Si RC responde, `core/stats` es la unica fuente para actividad actual.
 
 En la pantalla principal, la columna `API` muestra:
 
@@ -196,19 +228,41 @@ En Ajustes -> Servicios -> Detalle se puede:
 
 ### Errores
 
-La app separa claramente dos fuentes:
+La app separa actividad y errores. Un error historico en logs no convierte la columna `Actividad` en `Error reciente`.
+
+La pantalla principal usa tres conceptos:
+
+- `error_count_history`: errores detectados en logs o por la app posteriores a `last_error_clear_time`.
+- `rc_error_count`: valor `errors` de `core/stats` cuando RC/API esta disponible.
+- `service_failed`: `ActiveState=failed` desde systemd.
+
+La tabla y el tray muestran error visual solo si:
+
+- `service_failed` es verdadero.
+- `rc_error_count > 0`.
+- hay errores nuevos posteriores a `last_error_clear_time`.
+
+La app separa claramente estas fuentes:
 
 #### 1. Historial detectado por la app
 
 - Archivo: `~/.config/rclone-service-tray/errors.jsonl`
 - Es la fuente que alimenta:
-  - contador de errores en la tabla principal
-  - flag `recent_error`
-  - actividad `⚠️ Error reciente`
+  - `error_count_history`
+  - parte del contador de errores en la tabla principal
+  - flag visual `recent_error`
 - Se puede limpiar por servicio o globalmente.
 - Si se limpia, no reaparece automaticamente salvo que se detecte un error nuevo posterior al momento de limpieza.
+- Al limpiar, se guarda `last_error_clear_time` y la pantalla principal se refresca inmediatamente.
 
-#### 2. Logs originales
+#### 2. RC/API
+
+- Fuente: `core/stats`.
+- Campo usado: `errors`.
+- Alimenta `rc_error_count`.
+- Si RC esta disponible y `errors=0`, errores historicos antiguos no bloquean el estado global.
+
+#### 3. Logs originales
 
 - Fuente: `journalctl --user` y el `--log-file` configurado en cada remoto.
 - Solo lectura desde la ventana `Ver errores`.
@@ -223,11 +277,26 @@ Cada remoto abre un dialogo con dos pestañas:
 
 Incluye:
 
+- severidad: `Critico`, `Advertencia` o `Resuelto`
+- mensaje resumido
+- archivo afectado
 - agrupacion de errores repetidos por mensaje normalizado
 - cantidad
 - primera vez
 - ultima vez
+- fuente: `RC`, `log` o `journalctl`
+- detalle con mensaje original, incluyendo URL completa si existe
 - texto aclaratorio de que limpiar historial no toca logs originales
+
+Las URLs largas no se muestran completas en la lista principal. El resumen usa mensajes cortos como:
+
+```text
+Failed to copy: context canceled
+Archivo:
+CV JJGB/Cartas de Recomendacion/.~rta Recomendacion Andres Cavallin.docx
+```
+
+El detalle conserva el mensaje original completo.
 
 Si el historial esta vacio, se muestra:
 
@@ -291,6 +360,24 @@ No se cuentan como error lineas normales tipo:
 - `renamed in cache`
 - `removed cache file`
 
+Errores temporales de archivos lock/temp se clasifican como resueltos si despues se sube correctamente el archivo real.
+
+Patrones temporales:
+
+- nombres que empiezan con `.~`
+- nombres que empiezan con `~$`
+- archivos `.tmp`
+- archivos `.lock`
+
+Ejemplo:
+
+```text
+ERROR : carpeta/.~archivo.docx: Failed to copy: context canceled
+INFO  : carpeta/archivo.docx: upload succeeded
+```
+
+En ese caso el error temporal queda como `warning_resolved` y no bloquea el estado global si RC no reporta errores.
+
 ### Logs
 
 La app trabaja con logs en tres contextos:
@@ -348,15 +435,17 @@ El icono del tray mantiene el icono base de nube de la aplicacion y compone over
 Prioridad global:
 
 1. Error
-2. Upload activo por RC
-3. Download activo por RC
-4. Sync activo por RC
-5. Actividad estimada por logs
-6. Idle
+2. Estado transitorio de inicio, parada o reinicio
+3. Upload activo por RC
+4. Download activo por RC
+5. Sync activo por RC
+6. Actividad estimada por logs
+7. Idle
 
 Estados visuales:
 
 - error reciente: overlay de alerta con parpadeo suave
+- reinicio/inicio/parada en curso: spinner simple animado
 - subida: flecha hacia arriba animada
 - descarga: flecha hacia abajo animada
 - sincronizacion: spinner simple animado
