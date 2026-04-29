@@ -51,6 +51,14 @@ def make_service(url: str) -> RcloneService:
     )
 
 
+def make_remote_service(remote: str) -> RcloneService:
+    return RcloneService(
+        name=f"rclone-{remote.rstrip(':')}.service",
+        path=Path(f"/tmp/rclone-{remote.rstrip(':')}.service"),
+        remote=remote,
+    )
+
+
 def test_rc_noop_available() -> None:
     server = HTTPServer(("127.0.0.1", 0), RcHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -93,6 +101,81 @@ def test_core_stats_parse_downloading_activity() -> None:
     assert summary.state == "downloading"
 
 
+def test_core_stats_parse_remote_to_local_as_downloading_without_text_hint() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 256,
+            "speed": 64,
+            "transfers": 1,
+            "transferring": [
+                {
+                    "name": "report.pdf",
+                    "srcFs": "OneDrive:",
+                    "srcRemote": "Docs/report.pdf",
+                    "dstFs": "/home/user/Desktop",
+                    "dstRemote": "report.pdf",
+                    "size": 1024,
+                    "bytes": 256,
+                }
+            ],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "downloading"
+
+
+def test_core_stats_parse_mount_read_as_downloading() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 128,
+            "speed": 32,
+            "transferring": [{"name": "OneDrive/report.pdf", "operation": "read", "group": "mount"}],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "downloading"
+
+
+def test_core_stats_parse_srcfs_only_transfer_as_downloading() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "speed": 1552680.31,
+            "transferring": [{"name": "archivo.mp4", "srcFs": "OneDrive-Personal:"}],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "downloading"
+
+
+def test_core_stats_service_srcfs_only_transfer_as_downloading() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "speed": 1552680.31,
+            "transferring": [{"name": "archivo.mp4", "srcFs": "OneDrive-Personal:"}],
+            "checking": [],
+        },
+        make_remote_service("OneDrive-Personal:"),
+    )
+
+    assert summary.state == "downloading"
+
+
+def test_core_stats_service_dstfs_transfer_as_uploading() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "speed": 1552680.31,
+            "transferring": [{"name": "archivo.mp4", "srcFs": "Nextcloud:", "dstFs": "OneDrive-Personal:"}],
+            "checking": [],
+        },
+        make_remote_service("OneDrive-Personal:"),
+    )
+
+    assert summary.state == "uploading"
+
+
 def test_core_stats_parse_checking_as_syncing() -> None:
     summary = activity_summary_from_stats({"speed": 0, "transferring": [], "checking": [{"name": "file.txt"}]})
 
@@ -115,6 +198,28 @@ def test_idle_stats_return_idle() -> None:
     assert summary.state == "idle"
 
 
+def test_core_stats_empty_active_lists_with_stale_speed_is_idle() -> None:
+    summary = activity_summary_from_stats({"bytes": 1024, "speed": 1552680.31, "transferring": [], "checking": []})
+
+    assert summary.state == "idle"
+    assert summary.speed == 1552680.31
+
+
+def test_core_stats_empty_active_lists_with_transfers_and_stale_speed_is_idle() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 2048,
+            "speed": 1552680.31,
+            "transfers": 2,
+            "transferring": [],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "idle"
+    assert summary.transfers_count == 2
+
+
 def test_completed_transfer_counters_do_not_force_syncing() -> None:
     summary = activity_summary_from_stats(
         {
@@ -129,6 +234,52 @@ def test_completed_transfer_counters_do_not_force_syncing() -> None:
 
     assert summary.state == "idle"
     assert summary.transfers_count == 1
+    assert summary.transferring_count == 0
+    assert summary.checking_count == 0
+
+
+def test_core_stats_transfers_and_checks_counters_do_not_force_syncing() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 1044480,
+            "speed": 0,
+            "transfers": 1,
+            "checks": 3,
+            "transferring": [],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "idle"
+    assert summary.transfers_count == 1
+    assert summary.total_checks_count == 3
+    assert summary.checking_count == 0
+
+
+def test_core_stats_total_transfer_counters_do_not_force_syncing() -> None:
+    summary = activity_summary_from_stats(
+        {
+            "bytes": 1044480,
+            "speed": 0,
+            "totalTransfers": 4,
+            "totalChecks": 7,
+            "transferring": [],
+            "checking": [],
+        }
+    )
+
+    assert summary.state == "idle"
+    assert summary.total_transfers_count == 4
+    assert summary.total_checks_count == 7
+    assert summary.transferring_count == 0
+
+
+def test_core_stats_checks_counter_without_active_checking_is_idle() -> None:
+    summary = activity_summary_from_stats({"speed": 0, "checks": 5, "transferring": [], "checking": []})
+
+    assert summary.state == "idle"
+    assert summary.checking_count == 0
+    assert summary.total_checks_count == 5
 
 
 def test_core_stats_error_count_is_preserved() -> None:

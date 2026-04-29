@@ -8,6 +8,7 @@ import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 QApplication = QtWidgets.QApplication
+QLabel = QtWidgets.QLabel
 QMessageBox = QtWidgets.QMessageBox
 
 from rclonetray.activity_detector import ActivityDetector
@@ -17,6 +18,7 @@ from rclonetray.main_window import MainWindow
 from rclonetray.rc_client import ActivitySummary
 from rclonetray.service_model import RcloneService
 from rclonetray.systemd_manager import CommandResult
+from rclonetray.tray import _get_global_tray_state
 
 
 class FakeSystemd:
@@ -65,7 +67,10 @@ class FakeTray:
     def update_services(self, services) -> None:
         self.calls += 1
         self.snapshots.append(
-            [(service.name, service.active_state, service.transient_state, service.recent_error) for service in services]
+            [
+                (service.name, service.active_state, service.transient_state, service.recent_error, service.activity)
+                for service in services
+            ]
         )
 
 
@@ -181,6 +186,309 @@ def test_apply_rc_idle_clears_expired_pulse(tmp_path: Path) -> None:
     assert service.activity_reason is None
     assert service.activity == "idle"
     assert service.activity_source == "rc"
+
+
+def test_apply_rc_idle_after_syncing_forces_idle(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "logs"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "copied"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(state="idle", source="rc", transfers_count=0, transferring_count=0, checking_count=0, speed=0),
+    )
+
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+
+
+def test_apply_rc_idle_ignores_historical_transfer_and_check_counters(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "rc"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "log"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(
+            state="syncing",
+            source="rc",
+            transfers_count=3,
+            total_transfers_count=3,
+            total_checks_count=2,
+            transferring_count=0,
+            checking_count=0,
+            active_checking_count=0,
+            speed=0,
+        ),
+    )
+
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+    assert service.activity_until is None
+    assert service.activity_reason is None
+
+
+def test_cancelled_copy_with_stale_rc_speed_forces_idle(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "rc"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "context canceled"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(
+            state="idle",
+            source="rc",
+            transfers_count=2,
+            total_transfers_count=2,
+            transferring_count=0,
+            active_transferring_count=0,
+            checking_count=0,
+            active_checking_count=0,
+            speed=1552680.31,
+        ),
+    )
+
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+    assert service.activity_until is None
+    assert service.activity_reason is None
+
+
+def test_apply_rc_idle_clears_active_activity_until_and_reason(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "downloading"
+    service.activity_source = "pulse"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "log"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(service.name, ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0))
+
+    assert service.activity == "idle"
+    assert service.activity_until is None
+    assert service.activity_reason is None
+
+
+def test_small_copy_completion_with_rc_counters_returns_to_idle(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "downloading"
+    service.activity_source = "rc"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(
+            state="idle",
+            source="rc",
+            transfers_count=1,
+            total_transfers_count=1,
+            transferring_count=0,
+            checking_count=0,
+            speed=0,
+        ),
+    )
+
+    assert service.activity == "idle"
+    assert _get_global_tray_state([service]) == "idle"
+
+
+def test_tray_returns_idle_with_stale_global_speed(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "rc"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(
+            state="idle",
+            source="rc",
+            transferring_count=0,
+            active_transferring_count=0,
+            checking_count=0,
+            active_checking_count=0,
+            speed=42.0,
+        ),
+    )
+
+    assert _get_global_tray_state([service]) == "idle"
+
+
+def test_recent_copied_upload_and_cancel_logs_do_not_override_rc_idle(tmp_path: Path) -> None:
+    now = dt.datetime(2026, 4, 28, 13, 31, 24)
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026/04/28 13:31:04 INFO  : old.txt: Copied (new)",
+                "2026/04/28 13:31:05 INFO  : new.txt: upload succeeded",
+                "2026/04/28 13:31:06 ERROR : cancel.txt: Failed to copy: context canceled",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.log_file = log_file
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity_summary = ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0)
+    window = MainWindow.__new__(MainWindow)
+    window.app_started_at = now - dt.timedelta(seconds=30)
+    window.activity = ActivityDetector(LogManager(FakeSystemd(), logs_dir=tmp_path), now=lambda: now)
+    window._request_rc_summary = lambda _service: None
+
+    window._update_service_activity(service)
+
+    assert service.activity == "idle"
+    assert service.activity_source == "rc"
+    assert service.activity_until is None
+    assert service.activity_reason is None
+
+
+def test_active_rc_transfer_with_recent_upload_log_marks_uploading(tmp_path: Path) -> None:
+    now = dt.datetime(2026, 4, 28, 13, 31, 24)
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text("2026/04/28 13:31:20 INFO  : file.txt: upload succeeded", encoding="utf-8")
+    service = make_service(tmp_path, "rclone-OneDrive-Personal.service")
+    service.remote = "OneDrive-Personal:"
+    service.log_file = log_file
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = {service.name}
+    window.app_started_at = now - dt.timedelta(seconds=30)
+    window.activity = ActivityDetector(LogManager(FakeSystemd(), logs_dir=tmp_path), now=lambda: now)
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(
+        service.name,
+        ActivitySummary(
+            state="syncing",
+            source="rc",
+            transferring_count=1,
+            active_transferring_count=1,
+            active_files=[{"name": "file.txt"}],
+        ),
+    )
+
+    assert service.activity == "uploading"
+    assert service.activity_source == "rc"
+
+
+def test_table_and_tray_use_service_activity_for_uploading(tmp_path: Path) -> None:
+    systemd = FakeSystemd()
+    window = make_window(tmp_path, systemd)
+    service = make_service(tmp_path, "rclone-OneDrive-Personal.service")
+    service.active_state = "active"
+    service.activity = "uploading"
+    service.activity_summary = ActivitySummary(state="uploading", active_transferring_count=1)
+    window.services = [service]
+    window._populate_table()
+
+    widget = window.table.cellWidget(0, 2)
+
+    assert isinstance(widget, QLabel)
+    assert "Subiendo" in widget.text()
+    assert _get_global_tray_state([service]) == "uploading"
+
+
+def test_cancelled_copy_with_rc_idle_stays_idle(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "logs"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "context canceled"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = {service.name}
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(service.name, ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0))
+
+    assert service.activity == "idle"
+    assert service.activity_until is None
+    assert service.activity_reason is None
+
+
+def test_onedrive_cancelled_copy_does_not_stay_syncing(tmp_path: Path) -> None:
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.remote = "OneDrive:"
+    service.active_state = "active"
+    service.rc_enabled = True
+    service.rc_status = "active"
+    service.activity = "syncing"
+    service.activity_source = "pulse"
+    service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
+    service.activity_reason = "context canceled"
+    window = MainWindow.__new__(MainWindow)
+    window.services = [service]
+    window._rc_pending = set()
+    window._refresh_error_state = lambda _service: None
+    window._update_service_row = lambda _service: None
+
+    window._apply_rc_summary(service.name, ActivitySummary(state="idle", source="rc", transfers_count=0, checking_count=0, speed=0))
+
+    assert service.activity == "idle"
+    assert _get_global_tray_state([service]) == "idle"
 
 
 def test_inactive_service_with_old_syncing_summary_becomes_idle(tmp_path: Path) -> None:
@@ -391,6 +699,28 @@ def test_warning_history_does_not_mark_visual_error_when_service_and_rc_are_ok(t
     service = make_service(tmp_path)
     service.active_state = "active"
     service.rc_error_count = 0
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=history)  # type: ignore[arg-type]
+    window = MainWindow.__new__(MainWindow)
+    window.logs = logs
+    window.config = AppConfig()
+
+    window._refresh_error_state(service)
+
+    assert service.error_count_history == 0
+    assert service.recent_errors == 0
+    assert not service.recent_error
+
+
+def test_cancelation_with_rc_idle_does_not_mark_visual_error(tmp_path: Path) -> None:
+    history = tmp_path / "errors.jsonl"
+    history.write_text(
+        '{"service": "rclone-OneDrive.service", "line": "2026/04/28 10:00:00 ERROR : file.txt: Failed to copy: Put \\"https://example.com/path\\": context canceled", "severity": "warning", "type": "Operación cancelada por el usuario / copia interrumpida"}\n',
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path, "rclone-OneDrive.service")
+    service.active_state = "active"
+    service.rc_error_count = 0
+    service.activity_summary = ActivitySummary(state="idle", source="rc", active_transferring_count=0, active_checking_count=0)
     logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=history)  # type: ignore[arg-type]
     window = MainWindow.__new__(MainWindow)
     window.logs = logs

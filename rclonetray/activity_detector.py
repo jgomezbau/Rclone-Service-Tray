@@ -12,6 +12,7 @@ from rclonetray.service_model import RcloneService
 RCLONE_TS_RE = re.compile(r"^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\b")
 CLEANED_IDLE_RE = re.compile(r"vfs cache: cleaned:.*to upload 0,\s*uploading 0", re.I)
 UPLOADING_COUNT_RE = re.compile(r"\buploading\s+([1-9]\d*)\b", re.I)
+CANCELLED_RE = re.compile(r"context canceled|operation canceled|cancelled|canceled", re.I)
 
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("downloading", re.compile(r"download|Downloaded|Transferred.*\/", re.I)),
@@ -78,7 +79,9 @@ class ActivityDetector:
     def _activity_for_line(self, line: str) -> str | None:
         if CLEANED_IDLE_RE.search(line):
             return "idle"
-        if re.search(r"queuing for upload|upload succeeded", line, re.I):
+        if CANCELLED_RE.search(line):
+            return "syncing"
+        if re.search(r"queuing for upload|upload succeeded|Copied|Updated modification time", line, re.I):
             return "uploading"
         if re.search(r"Committing uploads", line, re.I):
             return "syncing"

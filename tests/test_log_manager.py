@@ -256,3 +256,80 @@ def test_onedrive_slow_upload_group_dedupes_legacy_critical_entry() -> None:
     assert len(grouped) == 1
     assert grouped[0].severity == "warning"
     assert grouped[0].error_type == "Advertencia transitoria: upload interrumpido o demorado"
+
+
+def test_failed_to_copy_put_context_canceled_is_warning_with_normalized_url() -> None:
+    line = '2026/04/28 10:00:00 ERROR : file.txt: Failed to copy: Put "https://graph.microsoft.com/v1.0/long/path": context canceled'
+
+    entry = classify_error_entry(line, [line])
+
+    assert entry.severity == "warning"
+    assert entry.error_type == "Operación cancelada por el usuario / copia interrumpida"
+    assert summarize_for_test(line) == 'Failed to copy: Put "<url>": context canceled'
+
+
+def test_failed_to_copy_post_context_canceled_is_warning_with_normalized_url() -> None:
+    line = '2026/04/28 10:00:00 ERROR : file.txt: Failed to copy: Post "https://graph.microsoft.com/v1.0/long/path": context canceled'
+
+    entry = classify_error_entry(line, [line])
+
+    assert entry.severity == "warning"
+    assert entry.error_type == "Operación cancelada por el usuario / copia interrumpida"
+    assert summarize_for_test(line) == 'Failed to copy: Post "<url>": context canceled'
+
+
+def test_dir_remove_not_empty_near_context_canceled_is_warning() -> None:
+    lines = [
+        '2026/04/28 10:00:00 ERROR : file.txt: Failed to copy: Put "https://example.com/path": context canceled',
+        "2026/04/28 10:00:20 ERROR : folder: Dir.Remove not empty",
+    ]
+
+    entry = classify_error_entry(lines[1], lines)
+
+    assert entry.severity == "warning"
+    assert entry.error_type == "Limpieza posterior a cancelación"
+
+
+def test_io_error_directory_not_empty_near_context_canceled_is_warning() -> None:
+    lines = [
+        '2026/04/28 10:00:00 ERROR : file.txt: Failed to copy: Post "https://example.com/path": context canceled',
+        "2026/04/28 10:00:30 ERROR : folder: IO error: directory not empty",
+    ]
+
+    entry = classify_error_entry(lines[1], lines)
+
+    assert entry.severity == "warning"
+    assert entry.error_type == "Limpieza posterior a cancelación"
+
+
+def test_multiple_context_canceled_entries_are_grouped_in_same_window() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    lines = [
+        f'2026/04/28 10:00:0{index} ERROR : file{index}.txt: Failed to copy: Put "https://example.com/{index}": context canceled'
+        for index in range(3)
+    ]
+
+    grouped = logs.grouped_errors([classify_error_entry(line, lines) for line in lines])
+
+    assert len(grouped) == 1
+    assert grouped[0].severity == "warning"
+    assert grouped[0].error_type == "Operación cancelada por el usuario / copia interrumpida"
+    assert grouped[0].message == "Transferencias canceladas por el usuario"
+    assert grouped[0].count == 3
+    assert "file0.txt" in grouped[0].detail
+    assert "file2.txt" in grouped[0].detail
+
+
+def test_dir_remove_not_empty_without_nearby_cancelation_is_critical() -> None:
+    line = "2026/04/28 10:00:00 ERROR : folder: Dir.Remove not empty"
+
+    entry = classify_error_entry(line, [line])
+
+    assert entry.severity == "critical"
+    assert entry.error_type == "Error crítico"
+
+
+def summarize_for_test(line: str) -> str:
+    from rclonetray.log_manager import summarize_error_message
+
+    return summarize_error_message(line)

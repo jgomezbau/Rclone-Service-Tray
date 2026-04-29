@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -36,6 +37,44 @@ from rclonetray.service_parser import load_services
 from rclonetray.settings_window import SettingsWindow
 from rclonetray.systemd_manager import SystemdManager
 from rclonetray.theme_manager import apply_theme
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _is_rc_idle(summary: ActivitySummary) -> bool:
+    active_transferring_count = max(summary.transferring_count, getattr(summary, "active_transferring_count", 0))
+    active_checking_count = max(summary.checking_count, getattr(summary, "active_checking_count", 0))
+    return (
+        active_transferring_count == 0
+        and active_checking_count == 0
+    )
+
+
+def _service_has_real_activity(service: RcloneService) -> bool:
+    summary = service.activity_summary
+    if not isinstance(summary, ActivitySummary):
+        return False
+    return (
+        summary.active_transferring_count > 0
+        or summary.active_checking_count > 0
+    )
+
+
+def _apply_idle_from_rc(service: RcloneService, summary: ActivitySummary) -> None:
+    service.activity = "idle"
+    service.activity_source = "rc"
+    service.activity_summary = summary
+    service.activity_until = None
+    service.activity_reason = None
+    service.rc_error_count = summary.error_count
+
+
+def _apply_rc_activity(service: RcloneService, summary: ActivitySummary) -> None:
+    service.activity = summary.state
+    service.activity_source = "rc"
+    service.activity_summary = summary
+    service.rc_error_count = summary.error_count
 
 
 STATUS_LABELS = {
@@ -334,10 +373,10 @@ class MainWindow(QMainWindow):
             cached = service.activity_summary
             rc_summary = cached if isinstance(cached, ActivitySummary) and cached.source == "rc" else None
             if rc_summary is not None and rc_summary.state != "unavailable":
-                service.activity = rc_summary.state
-                service.activity_source = "rc"
-                service.activity_summary = rc_summary
-                service.rc_error_count = rc_summary.error_count
+                if _is_rc_idle(rc_summary):
+                    _apply_idle_from_rc(service, rc_summary)
+                else:
+                    self._apply_active_rc_summary(service, rc_summary)
             elif service.rc_status == "unavailable":
                 fallback = self._log_pulse_summary(service)
                 service.activity = fallback.state
@@ -359,6 +398,17 @@ class MainWindow(QMainWindow):
         if summary.state != "idle":
             service.activity_until = dt.datetime.now() + dt.timedelta(seconds=10)
             service.activity_reason = "log"
+        return summary
+
+    def _apply_active_rc_summary(self, service: RcloneService, summary: ActivitySummary) -> None:
+        _apply_rc_activity(service, self._summary_with_recent_upload_log(service, summary))
+
+    def _summary_with_recent_upload_log(self, service: RcloneService, summary: ActivitySummary) -> ActivitySummary:
+        if not (summary.active_transferring_count > 0 or summary.transferring_count > 0):
+            return summary
+        log_summary = self.activity.get_activity_summary(service, since=self.app_started_at, max_age_seconds=10)
+        if log_summary.state == "uploading":
+            summary.state = "uploading"
         return summary
 
     def _request_rc_summary(self, service: RcloneService) -> None:
@@ -404,15 +454,25 @@ class MainWindow(QMainWindow):
         else:
             service.rc_status = "active"
             service.rc_error_count = summary.error_count
-            if summary.state == "idle" and not self._activity_pulse_active(service):
-                self._clear_activity_pulse(service)
-                service.activity = "idle"
-            elif summary.state == "idle":
-                service.activity = "idle"
+            if self._transient_state_active(service):
+                service.activity_summary = summary
+                self._refresh_error_state(service)
+                self._update_service_row(service)
+                return
+            if _is_rc_idle(summary):
+                _apply_idle_from_rc(service, summary)
             else:
-                service.activity = summary.state
-            service.activity_source = "rc"
-            service.activity_summary = summary
+                self._apply_active_rc_summary(service, summary)
+                if service.activity == "syncing":
+                    LOGGER.debug(
+                        "RC syncing raw_stats for %s: transfers=%r checks=%r transferring=%r checking=%r speed=%r",
+                        service.name,
+                        summary.raw_stats.get("transfers"),
+                        summary.raw_stats.get("checks"),
+                        summary.raw_stats.get("transferring"),
+                        summary.raw_stats.get("checking"),
+                        summary.raw_stats.get("speed"),
+                    )
         self._refresh_error_state(service)
         self._update_service_row(service)
 
@@ -527,11 +587,16 @@ class MainWindow(QMainWindow):
             return
         if self._activity_pulse_active(service):
             return
+        if service.activity in {"uploading", "downloading", "syncing"} and not _service_has_real_activity(service):
+            service.activity = "idle"
+            service.activity_source = "rc" if service.rc_enabled else "logs"
+            service.activity_until = None
+            service.activity_reason = None
+            return
         if service.rc_enabled and service.rc_status == "active":
             cached = service.activity_summary
-            if isinstance(cached, ActivitySummary) and cached.source == "rc" and cached.state == "idle":
-                service.activity = "idle"
-                service.activity_source = "rc"
+            if isinstance(cached, ActivitySummary) and cached.source == "rc" and _is_rc_idle(cached):
+                _apply_idle_from_rc(service, cached)
 
     def _transient_state_active(self, service: RcloneService) -> bool:
         until = service.transient_until

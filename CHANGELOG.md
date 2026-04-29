@@ -4,13 +4,17 @@ Todos los cambios importantes de Rclone Service Tray se documentarán en este ar
 
 El formato está inspirado en [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) y el proyecto sigue versionado semántico cuando aplique.
 
-## [1.0.1] - 2026-04-29
+## [1.0.2] - 2026-04-29
 
 ### Fixed
 
 - Evita que contadores acumulados de `rclone core/stats` dejen servicios en `Sincronizando` cuando RC está inactivo.
 - Normaliza iconos, fuente y estados visuales en el paquete `.deb`.
 - Clasifica advertencias benignas de archivos temporales, VFS cache local y subidas demoradas de OneDrive sin activar error crítico visual.
+- Clasifica cancelaciones de copia (`context canceled`, `operation canceled`, `cancelled`, `canceled`) como advertencias y agrupa la limpieza posterior `directory not empty` cuando ocurre en la misma ventana temporal.
+- Corrige la detección de actividad por servicio desde RC usando `srcFs`/`dstFs`, incluyendo copias entre remotos montados y subidas locales hacia un remoto.
+- Evita que el tray mantenga flechas de actividad por `speed`, contadores o pulsos antiguos cuando RC ya no reporta transferencias ni checks activos.
+- Añade estado global bidireccional para mostrar actividad simultánea de subida y descarga entre servicios.
 - Evita pulsos de actividad por logs antiguos al iniciar la app si RC reporta estado inactivo.
 - Permite limpiar logs ubicados en la ruta estándar de rclone `~/.local/state/rclone`.
 - Evita marcar como error la limpieza global de logs cuando un servicio no tiene log configurado o el archivo aún no existe.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QAction, QFont, QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -7,19 +9,53 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from rclonetray.icons import app_icon, icon
 
 
-TRAY_STATES = {"error", "restarting", "uploading", "downloading", "syncing", "idle"}
+TRAY_STATES = {"error", "restarting", "bidirectional", "uploading", "downloading", "syncing", "idle"}
+
+
+def _service_has_real_activity(service) -> bool:
+    summary = getattr(service, "activity_summary", None)
+    if not summary:
+        return False
+    return (
+        getattr(summary, "active_transferring_count", 0) > 0
+        or getattr(summary, "active_checking_count", 0) > 0
+    )
+
+
+def _transient_state_active(service) -> bool:
+    if getattr(service, "transient_state", None) not in {"restarting", "starting", "stopping", "mounting"}:
+        return False
+    until = getattr(service, "transient_until", None)
+    return not (isinstance(until, dt.datetime) and until < dt.datetime.now())
+
+
+def _service_activity_for_tray(service) -> str:
+    activity = getattr(service, "activity", "")
+    if activity in {"uploading", "downloading", "syncing", "cleaning"}:
+        if _service_has_real_activity(service) or _transient_state_active(service):
+            return activity
+        return "idle"
+    return activity
 
 
 def _get_global_tray_state(services) -> str:
-    if any(getattr(service, "recent_error", False) for service in services):
+    if any(
+        getattr(service, "recent_error", False)
+        or getattr(service, "service_failed", False)
+        or getattr(service, "rc_error_count", 0) > 0
+        for service in services
+    ):
         return "error"
-    if any(getattr(service, "transient_state", None) in {"restarting", "starting", "stopping", "mounting"} for service in services):
+    if any(_transient_state_active(service) for service in services):
         return "restarting"
-    if any(getattr(service, "activity", "") == "uploading" for service in services):
+    activities = [_service_activity_for_tray(service) for service in services]
+    if "uploading" in activities and "downloading" in activities:
+        return "bidirectional"
+    if "uploading" in activities:
         return "uploading"
-    if any(getattr(service, "activity", "") == "downloading" for service in services):
+    if "downloading" in activities:
         return "downloading"
-    if any(getattr(service, "activity", "") in {"syncing", "cleaning"} for service in services):
+    if any(activity in {"syncing", "cleaning"} for activity in activities):
         return "syncing"
     return "idle"
 
@@ -42,6 +78,8 @@ def _build_tray_icon(state: str, animation_frame: int, base_icon: QIcon | None =
         _draw_center_text(painter, "↑", QColor("white"), point_size=46, y_offset=-4)
     elif state == "downloading":
         _draw_center_text(painter, "↓", QColor("white"), point_size=46, y_offset=-4)
+    elif state == "bidirectional":
+        _draw_center_text(painter, "↕", QColor("white"), point_size=44, y_offset=-3)
     else:
         _draw_spinner_icon(painter, animation_frame)
     painter.end()
@@ -52,6 +90,7 @@ def _draw_state_background(painter: QPainter, state: str) -> None:
     colors = {
         "error": "#d92d20",
         "restarting": "#7c3aed",
+        "bidirectional": "#0f766e",
         "uploading": "#18794e",
         "downloading": "#1d4ed8",
         "syncing": "#7c3aed",
@@ -147,12 +186,13 @@ class TrayController:
 
     def _tooltip_text(self, state: str) -> str:
         active = sum(1 for service in self.services if getattr(service, "active_state", "") == "active")
-        syncing = sum(1 for service in self.services if getattr(service, "activity", "") in {"uploading", "downloading", "syncing", "cleaning"})
+        syncing = sum(1 for service in self.services if _service_activity_for_tray(service) in {"uploading", "downloading", "syncing", "cleaning"})
         errors = sum(1 for service in self.services if getattr(service, "recent_error", False))
         restarting = sum(1 for service in self.services if getattr(service, "transient_state", None) in {"restarting", "starting", "stopping", "mounting"})
         labels = {
             "error": "errores detectados",
             "restarting": "servicios cambiando de estado",
+            "bidirectional": "subiendo y descargando",
             "uploading": "subiendo archivos",
             "downloading": "descargando archivos",
             "syncing": "sincronizando archivos",

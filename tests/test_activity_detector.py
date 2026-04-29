@@ -69,6 +69,10 @@ def test_log_activity_summary_marks_source_logs(tmp_path: Path) -> None:
     assert summary.source == "logs"
 
 
+def test_context_canceled_log_is_temporary_activity_signal(tmp_path: Path) -> None:
+    assert detect_activity(tmp_path, ["2026/04/28 13:31:04 ERROR : file.txt: Failed to copy: context canceled"]) == "syncing"
+
+
 def test_rc_idle_takes_priority_over_log_upload(tmp_path: Path) -> None:
     service = RcloneService(name="rclone-Test.service", path=tmp_path / "rclone-Test.service", rc_enabled=True)
     selected = select_activity_summary(

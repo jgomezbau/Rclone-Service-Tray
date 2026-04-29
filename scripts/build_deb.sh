@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-1.0.1}"
+VERSION="${VERSION:-1.0.2}"
 BUILD="$ROOT/build/deb/rclone-service-tray_${VERSION}_all"
 DIST="$ROOT/dist"
 

@@ -121,7 +121,16 @@ Despues del comando, la app consulta `systemd.show_state(service.name)`, limpia 
 
 ### Actividad reciente
 
-La actividad usa `rclone RC/API` como fuente principal cuando el servicio tiene `--rc` configurado y responde. Si RC esta disponible, los logs no se usan para decidir la columna `Actividad`, aunque existan lineas recientes como `queuing for upload`, `upload succeeded`, `Copied` o `Failed to copy`.
+La actividad usa `rclone RC/API` como fuente principal cuando el servicio tiene `--rc` configurado y responde. La columna `Actividad` y el tray leen el mismo campo interno del servicio: `service.activity`.
+
+Cuando RC reporta transferencias activas, la app clasifica cada servicio con los datos de su propio `core/stats`:
+
+- `dstFs` relacionado con el remoto del servicio => `uploading`.
+- `srcFs` relacionado con el remoto del servicio y sin destino claro => `downloading`.
+- `operation` o `direction` con `upload` / `download` => `uploading` / `downloading`.
+- Si RC tiene transferencia activa pero no expone destino claro, logs recientes como `upload succeeded`, `Copied` o `Updated modification time` pueden refinar el estado a `uploading`.
+
+Si RC queda sin `transferring` ni `checking`, la actividad vuelve a `Inactivo` aunque queden velocidades, contadores o pulsos de logs antiguos.
 
 Si RC no esta configurado, o no responde, la app mantiene la deteccion por logs como fallback.
 
@@ -135,10 +144,10 @@ Cuando RC/API esta disponible:
 
 - La fuente visual es `RC/API`.
 - La app consulta `core/stats`.
-- Si `transfers=0`, `speed=0` y `checks=0`, se muestra `Inactivo`.
+- Si no hay `transferring` ni `checking` activos, se muestra `Inactivo`.
 - El tooltip de actividad indica `Actividad en tiempo real desde RC/API`.
 - El modal de actividad muestra el estado actual de RC y una seccion separada `Eventos recientes del log`.
-- Los eventos del log se muestran solo como contexto; no cambian la actividad actual.
+- Los eventos del log se muestran como contexto. Solo ayudan a distinguir `uploading` cuando RC confirma que hay transferencia activa pero no expone claramente el destino.
 
 Cuando la fuente es logs:
 
@@ -210,7 +219,7 @@ Reglas de seguridad:
 - Si se detecta `0.0.0.0`, la UI muestra una advertencia porque RC podria quedar expuesto a la red.
 - Si se usa `--rc-user` y `--rc-pass`, la app prepara Basic Auth y no muestra la contraseña en claro.
 - Los logs siguen siendo la fuente para diagnostico historico y auditoria.
-- Si RC responde, `core/stats` es la unica fuente para actividad actual.
+- Si RC responde, `core/stats` es la fuente principal para actividad actual. Los logs solo refinan subidas mientras RC confirma actividad real.
 
 En la pantalla principal, la columna `API` muestra:
 
@@ -240,7 +249,9 @@ La tabla y el tray muestran error visual solo si:
 
 - `service_failed` es verdadero.
 - `rc_error_count > 0`.
-- hay errores nuevos posteriores a `last_error_clear_time`.
+- hay errores criticos nuevos posteriores a `last_error_clear_time`.
+
+Las advertencias historicas no activan el estado visual de error si el servicio no esta fallando y RC reporta `errors=0`.
 
 La app separa claramente estas fuentes:
 
@@ -298,6 +309,21 @@ CV JJGB/Cartas de Recomendacion/.~rta Recomendacion Andres Cavallin.docx
 
 El detalle conserva el mensaje original completo.
 
+Las cancelaciones de copia se tratan como advertencias cuando no hay fallo del servicio ni errores RC activos. Ejemplos:
+
+```text
+Failed to copy: Put "<url>": context canceled
+Failed to copy: Post "<url>": context canceled
+```
+
+Si dentro de 30 segundos de una cancelacion aparecen mensajes de limpieza como `Dir.Remove not empty` o `IO error: directory not empty`, se agrupan como:
+
+```text
+Limpieza de directorio cancelada: directory not empty
+```
+
+Varias lineas `context canceled` en la misma ventana temporal se agrupan como `Transferencias canceladas por el usuario`; el detalle conserva la lista de archivos afectados.
+
 Si el historial esta vacio, se muestra:
 
 ```text
@@ -346,6 +372,10 @@ Se consideran errores reales solo si aparecen patrones como:
 - `couldn't`
 - `cannot`
 - `corrupt`
+- `context canceled`
+- `operation canceled`
+- `Dir.Remove not empty`
+- `directory not empty`
 
 No se cuentan como error lineas normales tipo:
 
@@ -377,6 +407,8 @@ INFO  : carpeta/archivo.docx: upload succeeded
 ```
 
 En ese caso el error temporal queda como `warning_resolved` y no bloquea el estado global si RC no reporta errores.
+
+Las cancelaciones de copia (`context canceled`, `operation canceled`, `cancelled`, `canceled`) se clasifican como `Advertencia`. La limpieza `directory not empty` solo queda como `Advertencia` si hay una cancelacion cercana; fuera de esa ventana se conserva como error critico.
 
 ### Logs
 
@@ -430,24 +462,25 @@ La liberacion de espacio del VFS sigue este flujo:
 
 ### Tray
 
-El icono del tray mantiene el icono base de nube de la aplicacion y compone overlays dinamicos en la esquina superior derecha.
+El icono del tray usa el icono base cuando no hay actividad y pinta indicadores a icono completo cuando hay estados relevantes.
 
 Prioridad global:
 
 1. Error
 2. Estado transitorio de inicio, parada o reinicio
-3. Upload activo por RC
-4. Download activo por RC
-5. Sync activo por RC
-6. Actividad estimada por logs
+3. Actividad bidireccional
+4. Upload activo
+5. Download activo
+6. Sync activo
 7. Idle
 
 Estados visuales:
 
-- error reciente: overlay de alerta con parpadeo suave
+- error reciente: alerta a icono completo
 - reinicio/inicio/parada en curso: spinner simple animado
-- subida: flecha hacia arriba animada
-- descarga: flecha hacia abajo animada
+- actividad bidireccional: flecha vertical `↕`
+- subida: flecha hacia arriba
+- descarga: flecha hacia abajo
 - sincronizacion: spinner simple animado
 - sin actividad: solo la nube base
 
@@ -455,6 +488,7 @@ Tooltip dinamico:
 
 - `Rclone Service Tray\nTodos los servicios inactivos`
 - `Rclone Service Tray\nActividad: subiendo archivos`
+- `Rclone Service Tray\nEstado: subiendo y descargando`
 - `Rclone Service Tray\nErrores detectados en N servicios`
 
 Se puede desactivar desde Ajustes con `show_tray_indicators`.
@@ -552,13 +586,13 @@ python3 -m rclonetray
 Construir `.deb`:
 
 ```bash
-VERSION=1.0.1 scripts/build_deb.sh
+VERSION=1.0.2 scripts/build_deb.sh
 ```
 
 Instalar:
 
 ```bash
-sudo apt install ./dist/rclone-service-tray_1.0.1_all.deb
+sudo apt install ./dist/rclone-service-tray_1.0.2_all.deb
 ```
 
 El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria para evitar reemplazar una instalacion oficial de rclone por el paquete de la distribucion.
@@ -566,20 +600,20 @@ El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria p
 Construir AppImage:
 
 ```bash
-VERSION=1.0.1 scripts/build_appimage.sh
+VERSION=1.0.2 scripts/build_appimage.sh
 ```
 
 Si `appimagetool` existe, el resultado esperado es:
 
 ```text
-dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
+dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
 ```
 
 Ejecutar AppImage:
 
 ```bash
-chmod +x dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
-./dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
+chmod +x dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
+./dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
 ```
 
 Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fallback para revisar el contenido.
@@ -587,7 +621,7 @@ Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fa
 Construir todo:
 
 ```bash
-VERSION=1.0.1 scripts/build_all.sh
+VERSION=1.0.2 scripts/build_all.sh
 ```
 
 ## Publicar release
@@ -598,9 +632,9 @@ Flujo recomendado:
 
 ```bash
 pytest
-VERSION=1.0.1 scripts/build_all.sh
-git tag -a v1.0.1 -m "v1.0.1"
-git push origin v1.0.1
+VERSION=1.0.2 scripts/build_all.sh
+git tag -a v1.0.2 -m "v1.0.2"
+git push origin v1.0.2
 ```
 
 GitHub Actions vuelve a ejecutar los tests, construye el `.deb` y el AppImage, y los adjunta a la release.

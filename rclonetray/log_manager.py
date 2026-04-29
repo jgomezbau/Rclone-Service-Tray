@@ -27,7 +27,7 @@ NON_ERROR_RE = re.compile(
 RCLONE_TS_RE = re.compile(r"^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\b")
 DNS_WEBDAV_RE = re.compile(r"(lookup|127\.0\.0\.53:53|i/o timeout|server misbehaving|Propfind)", re.I)
 LOOKUP_HOST_RE = re.compile(r"lookup\s+([A-Za-z0-9._-]+)", re.I)
-URL_RE = re.compile(r"(https?://[^\s/]+(?:/[^\s]*)?)", re.I)
+URL_RE = re.compile(r"(https?://[^\s\"]+)", re.I)
 RCLONE_OBJECT_RE = re.compile(r"\b(?:ERROR|CRITICAL|INFO|NOTICE|DEBUG)\s*:?\s+(.+?):\s+(.+)$", re.I)
 TEMP_PREFIXES = (".~", "~$")
 TEMP_SUFFIXES = (".tmp", ".lock")
@@ -39,6 +39,13 @@ VFS_CACHE_ERROR_RE = re.compile(
 )
 VFS_CACHE_PATH_RE = re.compile(r"(/[^\s:]*\.cache/rclone/vfs/[^\s:]+)", re.I)
 ONEDRIVE_SLOW_UPLOAD_RE = re.compile(r"upload chunks may be taking too long", re.I)
+CANCELLED_OPERATION_RE = re.compile(r"context canceled|operation canceled|cancelled|canceled", re.I)
+DIRECTORY_NOT_EMPTY_RE = re.compile(
+    r"Dir\.Remove not empty|Dir\.Remove failed to remove directory: directory not empty|"
+    r"IO error: directory not empty|directory not empty",
+    re.I,
+)
+CANCELLATION_WINDOW_SECONDS = 30
 ONEDRIVE_SLOW_UPLOAD_SUGGESTION = (
     "Puede ocurrir si el equipo se suspendió durante una subida. "
     "Reiniciar el servicio rclone o reintentar la operación."
@@ -73,6 +80,8 @@ class ErrorEntry:
 
 
 def is_error_line(line: str) -> bool:
+    if DIRECTORY_NOT_EMPTY_RE.search(line):
+        return True
     if ONEDRIVE_SLOW_UPLOAD_RE.search(line):
         return True
     if VFS_CACHE_ERROR_RE.search(line):
@@ -274,8 +283,17 @@ class LogManager:
                 normalized = "VFS cache local inconsistente al abrir archivo"
                 file_path = extract_vfs_cache_error_file(entry.line) or file_path
             timestamp = parse_error_timestamp(entry.line)
+            grouping_stamp = ""
+            if is_cancelled_operation(entry.line) and not is_temporary_file(extract_error_file(entry.line)):
+                normalized = "Transferencias canceladas por el usuario"
+                file_path = ""
+                grouping_stamp = cancellation_window_stamp(timestamp)
+            elif is_directory_not_empty_cleanup(entry.line) and entry.severity in {"warning", "minor_warning", "warning_resolved", "resolved"}:
+                normalized = "Limpieza de directorio cancelada: directory not empty"
+                file_path = ""
+                grouping_stamp = cancellation_window_stamp(timestamp)
             stamp = timestamp.isoformat(sep=" ", timespec="seconds") if timestamp is not None else None
-            key = f"{entry.severity}\0{entry.error_type}\0{normalized}\0{file_path}\0{entry.source}"
+            key = f"{entry.severity}\0{entry.error_type}\0{normalized}\0{file_path}\0{entry.source}\0{grouping_stamp}"
             if key not in grouped:
                 grouped[key] = GroupedError(
                     normalized,
@@ -493,6 +511,15 @@ def summarize_error_message(line: str) -> str:
     _, message = split_rclone_object_message(line)
     message = URL_RE.sub("<url>", message)
     message = re.sub(r"\s+", " ", message).strip()
+    if is_directory_not_empty_cleanup(line):
+        return "Limpieza de directorio cancelada: directory not empty"
+    cancelled_copy = re.search(
+        r'Failed to copy:\s*(Put|Post)\s+"<url>":\s*(context canceled|operation canceled|cancelled|canceled)',
+        message,
+        re.I,
+    )
+    if cancelled_copy:
+        return f'Failed to copy: {cancelled_copy.group(1)} "<url>": {cancelled_copy.group(2).lower()}'
     failed = re.search(r"Failed to copy:\s*([^:]+(?: canceled|cancelled|denied|failed|timeout)?)", message, re.I)
     if failed:
         return f"Failed to copy: {failed.group(1).strip()}"
@@ -556,7 +583,13 @@ def classification_priority(entry: ErrorEntry) -> int:
 
 
 def is_special_error_line(line: str) -> bool:
-    return is_temporary_file(extract_error_file(line)) or is_vfs_cache_error(line) or is_onedrive_slow_upload_error(line)
+    return (
+        is_temporary_file(extract_error_file(line))
+        or is_vfs_cache_error(line)
+        or is_onedrive_slow_upload_error(line)
+        or is_cancelled_operation(line)
+        or is_directory_not_empty_cleanup(line)
+    )
 
 
 def classify_error_line(line: str, following_context: list[str]) -> str:
@@ -565,6 +598,10 @@ def classify_error_line(line: str, following_context: list[str]) -> str:
         return "warning_resolved"
     if is_temporary_file(file_path):
         return "warning"
+    if is_cancelled_operation(line):
+        return "warning"
+    if is_directory_not_empty_cleanup(line):
+        return "warning" if has_nearby_cancelled_operation(line, following_context) else "critical"
     if is_vfs_cache_error(line):
         return "critical" if is_repeated_vfs_cache_error(line, following_context) else "warning"
     if is_onedrive_slow_upload_error(line):
@@ -576,6 +613,12 @@ def error_type_for_line(line: str, severity: str) -> str:
     file_path = extract_error_file(line)
     if is_temporary_file(file_path):
         return "Archivo temporal de editor"
+    if is_directory_not_empty_cleanup(line):
+        if severity in {"warning", "minor_warning", "warning_resolved", "resolved"}:
+            return "Limpieza posterior a cancelación"
+        return "Error crítico"
+    if is_cancelled_operation(line):
+        return "Operación cancelada por el usuario / copia interrumpida"
     if is_vfs_cache_error(line):
         return "VFS cache local inconsistente"
     if is_onedrive_slow_upload_error(line):
@@ -631,6 +674,37 @@ def is_vfs_cache_error(line: str) -> bool:
 
 def is_onedrive_slow_upload_error(line: str) -> bool:
     return bool(ONEDRIVE_SLOW_UPLOAD_RE.search(line))
+
+
+def is_cancelled_operation(line: str) -> bool:
+    return bool(CANCELLED_OPERATION_RE.search(line))
+
+
+def is_directory_not_empty_cleanup(line: str) -> bool:
+    return bool(DIRECTORY_NOT_EMPTY_RE.search(line))
+
+
+def has_nearby_cancelled_operation(line: str, lines: list[str]) -> bool:
+    target_timestamp = parse_error_timestamp(line)
+    if target_timestamp is None:
+        return any(is_cancelled_operation(candidate) for candidate in lines)
+    for candidate in lines:
+        if not is_cancelled_operation(candidate):
+            continue
+        timestamp = parse_error_timestamp(candidate)
+        if timestamp is None:
+            continue
+        if abs((timestamp - target_timestamp).total_seconds()) <= CANCELLATION_WINDOW_SECONDS:
+            return True
+    return False
+
+
+def cancellation_window_stamp(timestamp: dt.datetime | None) -> str:
+    if timestamp is None:
+        return ""
+    window_start_second = int(timestamp.timestamp()) // CANCELLATION_WINDOW_SECONDS * CANCELLATION_WINDOW_SECONDS
+    window_start = dt.datetime.fromtimestamp(window_start_second)
+    return window_start.isoformat(sep=" ", timespec="seconds")
 
 
 def extract_vfs_cache_error_file(line: str) -> str:
