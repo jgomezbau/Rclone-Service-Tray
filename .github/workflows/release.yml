@@ -19,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev fuse libfuse2 wget
+          sudo apt-get install -y dpkg-dev fuse libegl1 libfuse2 wget
           python -m pip install --upgrade pip
           python -m pip install -e . pytest
       - name: Test
