@@ -1,54 +1,80 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
-from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QPen, QPolygonF
+from PySide6.QtCore import Qt, QTimer, QRectF
+from PySide6.QtGui import QAction, QFont, QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from rclonetray.icons import app_icon, icon
 
 
-def compose_tray_icon(base_icon: QIcon, activity_state: str, has_error: bool, animation_frame: int) -> QIcon:
-    pixmap = base_icon.pixmap(64, 64)
-    composed = QPixmap(pixmap)
-    painter = QPainter(composed)
+TRAY_STATES = {"error", "restarting", "uploading", "downloading", "syncing", "idle"}
+
+
+def _get_global_tray_state(services) -> str:
+    if any(getattr(service, "recent_error", False) for service in services):
+        return "error"
+    if any(getattr(service, "transient_state", None) in {"restarting", "starting", "stopping", "mounting"} for service in services):
+        return "restarting"
+    if any(getattr(service, "activity", "") == "uploading" for service in services):
+        return "uploading"
+    if any(getattr(service, "activity", "") == "downloading" for service in services):
+        return "downloading"
+    if any(getattr(service, "activity", "") in {"syncing", "cleaning"} for service in services):
+        return "syncing"
+    return "idle"
+
+
+def _build_tray_icon(state: str, animation_frame: int, base_icon: QIcon | None = None) -> QIcon:
+    if state == "idle":
+        return base_icon or app_icon()
+
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    overlay_rect = QRectF(42, 2, 20, 20)
-    if has_error:
-        if animation_frame % 2 == 0:
-            painter.setBrush(QColor("#d92d20"))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(overlay_rect)
-            painter.setPen(QPen(QColor("white"), 2))
-            painter.drawLine(52, 7, 52, 15)
-            painter.drawPoint(52, 19)
-    elif activity_state == "uploading":
-        _draw_arrow_overlay(painter, overlay_rect, up=True)
-    elif activity_state == "downloading":
-        _draw_arrow_overlay(painter, overlay_rect, up=False)
-    elif activity_state == "syncing":
-        _draw_spinner_overlay(painter, overlay_rect, animation_frame)
-    painter.end()
-    return QIcon(composed)
-
-
-def _draw_arrow_overlay(painter: QPainter, rect: QRectF, up: bool) -> None:
-    painter.setBrush(QColor("#18794e" if up else "#1d4ed8"))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(rect)
-    painter.setBrush(QColor("white"))
-    if up:
-        points = [rect.center() + p for p in [QPointF(0, -6), QPointF(-4, 0), QPointF(-1, 0), QPointF(-1, 6), QPointF(1, 6), QPointF(1, 0), QPointF(4, 0)]]
+    _draw_state_background(painter, state)
+    if state == "error":
+        _draw_center_text(painter, "!", QColor("white"), point_size=38, y_offset=-1)
+        painter.setPen(QPen(QColor("white"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(24, 16, 32, 8)
+        painter.drawLine(32, 8, 40, 16)
+    elif state == "uploading":
+        _draw_center_text(painter, "↑", QColor("white"), point_size=46, y_offset=-4)
+    elif state == "downloading":
+        _draw_center_text(painter, "↓", QColor("white"), point_size=46, y_offset=-4)
     else:
-        points = [rect.center() + p for p in [QPointF(0, 6), QPointF(-4, 0), QPointF(-1, 0), QPointF(-1, -6), QPointF(1, -6), QPointF(1, 0), QPointF(4, 0)]]
-    painter.drawPolygon(QPolygonF(points))
+        _draw_spinner_icon(painter, animation_frame)
+    painter.end()
+    return QIcon(pixmap)
 
 
-def _draw_spinner_overlay(painter: QPainter, rect: QRectF, animation_frame: int) -> None:
-    painter.setBrush(QColor("#7c3aed"))
+def _draw_state_background(painter: QPainter, state: str) -> None:
+    colors = {
+        "error": "#d92d20",
+        "restarting": "#7c3aed",
+        "uploading": "#18794e",
+        "downloading": "#1d4ed8",
+        "syncing": "#7c3aed",
+    }
+    painter.setBrush(QColor(colors.get(state, "#2f7df6")))
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(rect)
-    painter.setPen(QPen(QColor("white"), 2))
-    painter.drawArc(rect.adjusted(3, 3, -3, -3), (animation_frame % 8) * 45 * 16, 180 * 16)
+    painter.drawRoundedRect(QRectF(4, 4, 56, 56), 14, 14)
+
+
+def _draw_center_text(painter: QPainter, text: str, color: QColor, point_size: int, y_offset: int = 0) -> None:
+    font = QFont("Noto Sans", point_size)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(color)
+    rect = QRectF(4, 4 + y_offset, 56, 56)
+    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+
+def _draw_spinner_icon(painter: QPainter, animation_frame: int) -> None:
+    painter.setPen(QPen(QColor("white"), 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    rect = QRectF(16, 16, 32, 32)
+    painter.drawArc(rect, (animation_frame % 8) * 45 * 16, 250 * 16)
+    _draw_center_text(painter, "↻", QColor("white"), point_size=25, y_offset=-1)
 
 
 class TrayController:
@@ -112,34 +138,33 @@ class TrayController:
         self._refresh_visuals()
 
     def _refresh_visuals(self) -> None:
-        state = self._global_state()
+        state = _get_global_tray_state(self.services)
         if self.window.config.show_tray_indicators:
-            self.tray.setIcon(compose_tray_icon(self.base_icon, state["activity"], state["has_error"], self.animation_frame))
+            self.tray.setIcon(_build_tray_icon(state, self.animation_frame, self.base_icon))
         else:
             self.tray.setIcon(self.base_icon)
         self.tray.setToolTip(self._tooltip_text(state))
 
-    def _global_state(self) -> dict[str, object]:
-        any_recent_error = sum(1 for service in self.services if getattr(service, "recent_error", False))
-        if any_recent_error:
-            return {"activity": "error", "has_error": True, "error_services": any_recent_error}
-        for activity in ["uploading", "downloading", "syncing"]:
-            if any(getattr(service, "activity", "") == activity for service in self.services):
-                return {"activity": activity, "has_error": False, "error_services": 0}
-        if any(getattr(service, "activity", "") == "cleaning" for service in self.services):
-            return {"activity": "syncing", "has_error": False, "error_services": 0}
-        return {"activity": "idle", "has_error": False, "error_services": 0}
-
-    def _tooltip_text(self, state: dict[str, object]) -> str:
-        if state["has_error"]:
-            count = state["error_services"]
-            suffix = "servicio" if count == 1 else "servicios"
-            return f"Rclone Service Tray\nErrores detectados en {count} {suffix}"
-        activity = state["activity"]
-        if activity == "uploading":
-            return "Rclone Service Tray\nActividad: subiendo archivos"
-        if activity == "downloading":
-            return "Rclone Service Tray\nActividad: descargando archivos"
-        if activity == "syncing":
-            return "Rclone Service Tray\nActividad: sincronizando archivos"
-        return "Rclone Service Tray\nTodos los servicios inactivos"
+    def _tooltip_text(self, state: str) -> str:
+        active = sum(1 for service in self.services if getattr(service, "active_state", "") == "active")
+        syncing = sum(1 for service in self.services if getattr(service, "activity", "") in {"uploading", "downloading", "syncing", "cleaning"})
+        errors = sum(1 for service in self.services if getattr(service, "recent_error", False))
+        restarting = sum(1 for service in self.services if getattr(service, "transient_state", None) in {"restarting", "starting", "stopping", "mounting"})
+        labels = {
+            "error": "errores detectados",
+            "restarting": "servicios cambiando de estado",
+            "uploading": "subiendo archivos",
+            "downloading": "descargando archivos",
+            "syncing": "sincronizando archivos",
+            "idle": "sin actividad",
+        }
+        return "\n".join(
+            [
+                "Rclone Service Tray",
+                f"Estado: {labels.get(state, state)}",
+                f"Activos: {active}",
+                f"En sincronización: {syncing}",
+                f"Con errores: {errors}",
+                f"Reiniciando/montando/deteniendo: {restarting}",
+            ]
+        )

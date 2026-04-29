@@ -11,6 +11,8 @@ from rclonetray.service_model import RcloneService
 from rclonetray.systemd_manager import CommandResult, SystemdManager
 
 
+DEFAULT_RCLONE_STATE_LOG_DIR = Path.home() / ".local" / "state" / "rclone"
+
 ERROR_RE = re.compile(
     r"((^|\s)(ERROR|CRITICAL)(\s|:)|Failed to|failed to|\bfatal\b|\bpanic\b|permission denied|"
     r"transport endpoint is not connected|rateLimitExceeded|unauthenticated|couldn't|\bcannot\b|corrupt)",
@@ -36,6 +38,11 @@ VFS_CACHE_ERROR_RE = re.compile(
     re.I,
 )
 VFS_CACHE_PATH_RE = re.compile(r"(/[^\s:]*\.cache/rclone/vfs/[^\s:]+)", re.I)
+ONEDRIVE_SLOW_UPLOAD_RE = re.compile(r"upload chunks may be taking too long", re.I)
+ONEDRIVE_SLOW_UPLOAD_SUGGESTION = (
+    "Puede ocurrir si el equipo se suspendió durante una subida. "
+    "Reiniciar el servicio rclone o reintentar la operación."
+)
 
 
 @dataclass
@@ -66,6 +73,8 @@ class ErrorEntry:
 
 
 def is_error_line(line: str) -> bool:
+    if ONEDRIVE_SLOW_UPLOAD_RE.search(line):
+        return True
     if VFS_CACHE_ERROR_RE.search(line):
         return True
     if NON_ERROR_RE.search(line):
@@ -126,27 +135,31 @@ class LogManager:
         self.record_error_entries(service, entries)
 
     def _original_error_entries(self, service: RcloneService, lines: int = 80) -> list[ErrorEntry]:
-        entries = [ErrorEntry(line, source="journalctl") for line in self.recent_journal_errors(service, 50)]
+        journal_lines = self.recent_journal_errors(service, 50)
+        entries = [classify_error_entry(line, journal_lines, source="journalctl") for line in journal_lines]
         file_lines = self.recent_file_lines(service.log_file, lines)
         entries.extend(
             classify_error_entry(line, file_lines)
             for line in file_lines
             if is_error_line(line)
         )
-        return entries[-lines:]
+        return dedupe_error_entries(service.name, entries)[-lines:]
 
     def record_detected_errors(self, service: RcloneService, errors: list[str]) -> None:
-        self.record_error_entries(service, [ErrorEntry(line) for line in errors])
+        self.record_error_entries(service, [classify_error_entry(line, errors) for line in errors])
 
     def record_error_entries(self, service: RcloneService, errors: list[ErrorEntry]) -> None:
         if not errors:
             return
         try:
             self.error_history_path.parent.mkdir(parents=True, exist_ok=True)
+            existing_keys = self._history_event_keys()
             with self.error_history_path.open("a", encoding="utf-8") as handle:
-                for entry in errors:
-                    key = f"{service.name}\0{entry.line}"
+                for entry in dedupe_error_entries(service.name, errors):
+                    key = stable_error_event_key(service.name, entry)
                     if key in self._recorded_errors or key in self._suppressed_errors:
+                        continue
+                    if key in existing_keys:
                         continue
                     self._recorded_errors.add(key)
                     handle.write(
@@ -189,19 +202,41 @@ class LogManager:
                 timestamp = parse_error_timestamp(stored_line)
                 if cleared_after is not None and timestamp is not None and timestamp <= cleared_after:
                     continue
+                classified = classify_error_entry(stored_line, [stored_line])
                 severity = entry.get("severity")
                 source = entry.get("source")
                 error_type = entry.get("type")
                 if not isinstance(severity, str):
-                    severity = "critical"
+                    severity = classified.severity
                 if not isinstance(source, str):
                     source = "log"
                 if not isinstance(error_type, str):
-                    error_type = error_type_for_severity(severity)
+                    error_type = classified.error_type
+                if is_special_error_line(stored_line) and severity == "critical":
+                    severity = classified.severity
+                    error_type = classified.error_type
                 entries.append(ErrorEntry(stored_line, severity=severity, source=source, error_type=error_type))
-            return entries[-lines:]
+            return dedupe_error_entries(service.name, entries)[-lines:]
         except OSError:
             return []
+
+    def _history_event_keys(self) -> set[str]:
+        if not self.error_history_path.exists():
+            return set()
+        keys: set[str] = set()
+        try:
+            for line in self.error_history_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                service_name = entry.get("service")
+                stored_line = entry.get("line")
+                if isinstance(service_name, str) and isinstance(stored_line, str):
+                    keys.add(stable_error_event_key(service_name, classify_error_entry(stored_line, [stored_line])))
+        except OSError:
+            return set()
+        return keys
 
     def history_errors_for_service(
         self,
@@ -226,8 +261,13 @@ class LogManager:
     def grouped_errors(self, lines: list[str] | list[ErrorEntry]) -> list[GroupedError]:
         grouped: dict[str, GroupedError] = {}
         order: list[str] = []
+        normalized_entries: list[ErrorEntry] = []
         for raw in lines:
             entry = raw if isinstance(raw, ErrorEntry) else ErrorEntry(raw)
+            if is_special_error_line(entry.line):
+                entry = classify_error_entry(entry.line, [entry.line], source=entry.source)
+            normalized_entries.append(entry)
+        for entry in dedupe_error_entries("", normalized_entries):
             normalized = summarize_error_message(entry.line)
             file_path = extract_error_file(entry.line)
             if is_vfs_cache_error(entry.line):
@@ -278,7 +318,11 @@ class LogManager:
             if item.severity in {"warning_resolved", "resolved"}:
                 meta.append(f"Estado: {item.severity}")
             meta.append(f"Fuente: {item.source}")
-            chunks.append("\n".join(meta) + f"\nDetalle: {item.detail}")
+            suggestion = suggestion_for_error_type(item.error_type)
+            detail = item.detail
+            if suggestion:
+                detail = f"{detail}\nSugerencia: {suggestion}"
+            chunks.append("\n".join(meta) + f"\nDetalle: {detail}")
         return "\n\n".join(chunks)
 
     def diagnose_service_errors(self, service: RcloneService, lines: list[str]) -> ErrorDiagnosis | None:
@@ -309,6 +353,7 @@ class LogManager:
             resolved = path.expanduser().resolve()
             safe_roots = [
                 self.logs_dir.expanduser().resolve(),
+                DEFAULT_RCLONE_STATE_LOG_DIR.expanduser().resolve(),
                 APP_CONFIG_DIR.expanduser().resolve(),
                 self.error_history_path.expanduser().resolve().parent,
             ]
@@ -333,7 +378,25 @@ class LogManager:
             return CommandResult(False, "", str(exc), 1)
 
     def clear_logs_for_services(self, services: list[RcloneService]) -> list[tuple[str, CommandResult]]:
-        return [(service.name, self.clear_log_for_service(service)) for service in services]
+        results: list[tuple[str, CommandResult]] = []
+        for service in services:
+            if service.log_file is None:
+                results.append((service.name, CommandResult(True, f"Omitido: {service.name} no tiene log configurado.", "", 0)))
+                continue
+            path = service.log_file.expanduser()
+            if self.is_safe_log_path(path) and not path.exists():
+                results.append((service.name, CommandResult(True, f"Omitido: el log no existe: {path}", "", 0)))
+                continue
+            results.append((service.name, self.clear_log_for_service(service)))
+        return results
+
+    def suppress_current_errors_for_services(self, services: list[RcloneService]) -> None:
+        for service in services:
+            for entry in self._original_error_entries(service):
+                self._suppressed_errors.add(stable_error_event_key(service.name, entry))
+
+    def suppress_current_errors_for_service(self, service: RcloneService) -> None:
+        self.suppress_current_errors_for_services([service])
 
     def clear_error_history(self) -> CommandResult:
         if not self.is_safe_log_path(self.error_history_path):
@@ -343,7 +406,7 @@ class LogManager:
             self.error_history_path.parent.mkdir(parents=True, exist_ok=True)
             self.error_history_path.write_text("", encoding="utf-8")
             self._recorded_errors.clear()
-            return CommandResult(True, f"Error history cleaned: {self.error_history_path}", "", 0)
+            return CommandResult(True, "Historial de errores limpiado correctamente.", "", 0)
         except OSError as exc:
             return CommandResult(False, "", str(exc), 1)
 
@@ -352,7 +415,7 @@ class LogManager:
             return CommandResult(False, "", f"Unsafe error history path: {self.error_history_path}", 1)
         try:
             if not self.error_history_path.exists():
-                return CommandResult(True, f"No error history for {service.name}", "", 0)
+                return CommandResult(True, f"No hay historial de errores para {service.name}.", "", 0)
             kept: list[str] = []
             for line in self.error_history_path.read_text(encoding="utf-8").splitlines():
                 try:
@@ -363,12 +426,12 @@ class LogManager:
                 if entry.get("service") == service.name:
                     stored_line = entry.get("line")
                     if isinstance(stored_line, str):
-                        self._suppressed_errors.add(f"{service.name}\0{stored_line}")
+                        self._suppressed_errors.add(stable_error_event_key(service.name, classify_error_entry(stored_line, [stored_line])))
                 else:
                     kept.append(line)
             self.error_history_path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
             self._recorded_errors = {key for key in self._recorded_errors if not key.startswith(f"{service.name}\0")}
-            return CommandResult(True, f"Error history cleaned for {service.name}", "", 0)
+            return CommandResult(True, f"Historial de errores limpiado para {service.name}.", "", 0)
         except OSError as exc:
             return CommandResult(False, "", str(exc), 1)
 
@@ -384,7 +447,7 @@ class LogManager:
                 service = entry.get("service")
                 stored_line = entry.get("line")
                 if isinstance(service, str) and isinstance(stored_line, str):
-                    self._suppressed_errors.add(f"{service}\0{stored_line}")
+                    self._suppressed_errors.add(stable_error_event_key(service, classify_error_entry(stored_line, [stored_line])))
         except OSError:
             return
 
@@ -452,9 +515,48 @@ def split_rclone_object_message(line: str) -> tuple[str, str]:
     return "", normalized
 
 
-def classify_error_entry(line: str, context: list[str]) -> ErrorEntry:
+def classify_error_entry(line: str, context: list[str], source: str = "log") -> ErrorEntry:
     severity = classify_error_line(line, context)
-    return ErrorEntry(line, severity=severity, source="log", error_type=error_type_for_line(line, severity))
+    return ErrorEntry(line, severity=severity, source=source, error_type=error_type_for_line(line, severity))
+
+
+def stable_error_event_key(service_name: str, entry: ErrorEntry) -> str:
+    timestamp = parse_error_timestamp(entry.line)
+    stamp = timestamp.isoformat(sep=" ", timespec="seconds") if timestamp is not None else ""
+    message = summarize_error_message(entry.line)
+    file_path = extract_error_file(entry.line)
+    if is_vfs_cache_error(entry.line):
+        message = "VFS cache local inconsistente al abrir archivo"
+        file_path = extract_vfs_cache_error_file(entry.line) or file_path
+    return "\0".join([service_name, stamp, message, file_path])
+
+
+def dedupe_error_entries(service_name: str, entries: list[ErrorEntry]) -> list[ErrorEntry]:
+    deduped: dict[str, ErrorEntry] = {}
+    order: list[str] = []
+    for entry in entries:
+        key = stable_error_event_key(service_name, entry)
+        if key not in deduped:
+            deduped[key] = entry
+            order.append(key)
+            continue
+        if classification_priority(entry) > classification_priority(deduped[key]):
+            deduped[key] = entry
+    return [deduped[key] for key in order]
+
+
+def classification_priority(entry: ErrorEntry) -> int:
+    if is_special_error_line(entry.line):
+        return 30
+    if entry.source == "RC":
+        return 20
+    if entry.source == "journalctl":
+        return 10
+    return 0
+
+
+def is_special_error_line(line: str) -> bool:
+    return is_temporary_file(extract_error_file(line)) or is_vfs_cache_error(line) or is_onedrive_slow_upload_error(line)
 
 
 def classify_error_line(line: str, following_context: list[str]) -> str:
@@ -465,6 +567,8 @@ def classify_error_line(line: str, following_context: list[str]) -> str:
         return "warning"
     if is_vfs_cache_error(line):
         return "critical" if is_repeated_vfs_cache_error(line, following_context) else "warning"
+    if is_onedrive_slow_upload_error(line):
+        return "critical" if is_repeated_onedrive_slow_upload_error(line, following_context) else "warning"
     return "critical"
 
 
@@ -474,6 +578,8 @@ def error_type_for_line(line: str, severity: str) -> str:
         return "Archivo temporal de editor"
     if is_vfs_cache_error(line):
         return "VFS cache local inconsistente"
+    if is_onedrive_slow_upload_error(line):
+        return "Advertencia transitoria: upload interrumpido o demorado"
     return error_type_for_severity(severity)
 
 
@@ -523,6 +629,10 @@ def is_vfs_cache_error(line: str) -> bool:
     return bool(VFS_CACHE_ERROR_RE.search(line))
 
 
+def is_onedrive_slow_upload_error(line: str) -> bool:
+    return bool(ONEDRIVE_SLOW_UPLOAD_RE.search(line))
+
+
 def extract_vfs_cache_error_file(line: str) -> str:
     object_path = extract_error_file(line)
     if object_path:
@@ -562,6 +672,31 @@ def is_repeated_vfs_cache_error(line: str, lines: list[str]) -> bool:
         if abs((timestamp - target_timestamp).total_seconds()) <= 60:
             repeats += 1
     return repeats > 3
+
+
+def is_repeated_onedrive_slow_upload_error(line: str, lines: list[str]) -> bool:
+    target_file = extract_error_file(line)
+    target_timestamp = parse_error_timestamp(line)
+    if target_timestamp is None:
+        return False
+    repeats = 0
+    for candidate in lines:
+        if not is_onedrive_slow_upload_error(candidate):
+            continue
+        if target_file and extract_error_file(candidate) != target_file:
+            continue
+        timestamp = parse_error_timestamp(candidate)
+        if timestamp is None:
+            continue
+        if abs((timestamp - target_timestamp).total_seconds()) <= 600:
+            repeats += 1
+    return repeats > 3
+
+
+def suggestion_for_error_type(error_type: str) -> str | None:
+    if error_type == "Advertencia transitoria: upload interrumpido o demorado":
+        return ONEDRIVE_SLOW_UPLOAD_SUGGESTION
+    return None
 
 
 def severity_label(severity: str) -> str:

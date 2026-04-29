@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -49,8 +50,10 @@ class SettingsWindow(QDialog):
         self.services = services
         self.systemd = systemd
         self.setWindowTitle("Ajustes - Rclone Service Tray")
-        self.setMinimumSize(840, 560)
+        self.setMinimumSize(900, 600)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         tabs = QTabWidget()
         tabs.addTab(self._services_tab(), "Servicios")
         tabs.addTab(self._appearance_tab(), "Apariencia")
@@ -58,69 +61,90 @@ class SettingsWindow(QDialog):
         tabs.addTab(self._paths_tab(), "Rutas")
         tabs.addTab(self._maintenance_tab(), "Mantenimiento")
         layout.addWidget(tabs)
+
         save = QPushButton("Guardar ajustes")
         save.setIcon(icon("document-save"))
+        save.setDefault(True)
+        save.setMinimumWidth(160)
+        save.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        save.setToolTip("Guardar la configuración actual")
         save.clicked.connect(self.save)
-        layout.addWidget(save)
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer.addWidget(save)
+        layout.addLayout(footer)
         self._resize_initial_window_to_content()
 
     def _services_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.addWidget(QLabel("Servicios detectados:"))
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        layout.addWidget(
+            self._section_title(
+                "Servicios detectados",
+                "Seleccioná qué servicios rclone querés mostrar y controlar desde la app.",
+            )
+        )
         self.service_checks: dict[str, QCheckBox] = {}
-        table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["Servicio", "Ruta", "Activo en Rclone Service Tray", "RC/API", "Acción"])
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["Servicio", "Ruta", "Activo", "RC/API"])
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(32)
         table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         detected = self._detected_services_for_settings()
         for row, service in enumerate(detected):
             table.insertRow(row)
-            table.setItem(row, 0, QTableWidgetItem(service.name))
-            table.setItem(row, 1, QTableWidgetItem(str(service.path)))
+            name_item = QTableWidgetItem(service.name)
+            path_item = QTableWidgetItem(str(service.path))
+            name_item.setToolTip(service.name)
+            path_item.setToolTip(str(service.path))
+            table.setItem(row, 0, name_item)
+            table.setItem(row, 1, path_item)
             active = QCheckBox()
             active.setChecked(service.name not in self.config.ignored_services)
+            active.setToolTip("Mostrar y controlar este servicio desde Rclone Service Tray")
             self.service_checks[service.name] = active
-            rc_detail = QPushButton("Detalle")
-            rc_detail.setIcon(icon("network-server", "dialog-information"))
+
+            rc_detail = self._make_action_button(
+                "Detalle",
+                "network-server",
+                "Ver detalle de configuración RC/API",
+                fallback_icon="dialog-information",
+                minimum_width=92,
+            )
             rc_detail.clicked.connect(lambda _, s=service, port=self._suggested_rc_port(service, detected): RcServiceDetailDialog(s, port, self).exec())
-            ignore = QPushButton("Ignorar")
-            ignore.setIcon(icon("list-remove", "edit-delete"))
-            ignore.clicked.connect(lambda _, name=service.name, checkbox=active: self._ignore_service(name, checkbox))
-            table.setCellWidget(row, 2, active)
-            table.setCellWidget(row, 3, rc_detail)
-            table.setCellWidget(row, 4, ignore)
+            table.setCellWidget(row, 2, self._centered_cell(active))
+            table.setCellWidget(row, 3, self._centered_cell(rc_detail))
         table.resizeColumnsToContents()
         table.setColumnWidth(0, min(max(table.columnWidth(0), 180), 260))
-        table.setColumnWidth(2, 190)
-        table.setColumnWidth(3, 100)
-        table.setColumnWidth(4, 110)
-        layout.addWidget(table)
-        add = QPushButton("Agregar archivo .service manualmente")
-        add.setIcon(icon("list-add"))
-        detect = QPushButton("Detectar automáticamente")
-        detect.setIcon(icon("system-search", "edit-find"))
-        restore_ignored = QPushButton("Restaurar ignorados")
-        restore_ignored.setIcon(icon("edit-undo"))
-        reload_daemon = QPushButton("Recargar daemon systemd user")
-        reload_daemon.setIcon(icon("system-run"))
+        table.setColumnWidth(2, 80)
+        table.setColumnWidth(3, 110)
+        layout.addWidget(table, 1)
+
+        add = self._make_action_button("Agregar .service", "list-add", "Agregar manualmente un archivo .service")
+        detect = self._make_action_button("Detectar automáticamente", "system-search", "Buscar servicios rclone nuevamente", fallback_icon="edit-find")
+        restore_ignored = self._make_action_button("Restaurar ignorados", "edit-undo", "Volver a mostrar todos los servicios ignorados")
+        reload_daemon = self._make_action_button("Recargar daemon", "system-run", "Ejecutar systemctl --user daemon-reload")
         add.clicked.connect(self._add_manual_service)
         detect.clicked.connect(self.request_reload_services.emit)
         restore_ignored.clicked.connect(self._restore_ignored)
         reload_daemon.clicked.connect(lambda: QMessageBox.information(self, "daemon-reload", self.systemd.daemon_reload().stderr or "Finalizado."))
-        layout.addWidget(add)
-        layout.addWidget(detect)
-        layout.addWidget(restore_ignored)
-        layout.addWidget(reload_daemon)
-        layout.addStretch()
+        layout.addLayout(self._make_button_row([add, detect, restore_ignored, reload_daemon]))
         return tab
 
     def _resize_initial_window_to_content(self) -> None:
         detected_count = len(self._detected_services_for_settings())
         desired_width = 980
-        desired_height = 620 if detected_count <= 8 else 700
+        desired_height = 640 if detected_count <= 8 else 700
         screen = self.screen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -130,16 +154,24 @@ class SettingsWindow(QDialog):
 
     def _appearance_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QFormLayout(tab)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        group, form = self._make_form_group("Apariencia", "Configurá cómo se adapta la aplicación al tema del sistema.")
         self.theme = QComboBox()
         self.theme.addItems(["system", "light", "dark"])
         self.theme.setCurrentText(self.config.theme)
-        layout.addRow("Tema", self.theme)
+        form.addRow("Tema", self.theme)
+        layout.addWidget(group)
+        layout.addStretch()
         return tab
 
     def _behavior_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QFormLayout(tab)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        group, form = self._make_form_group("Comportamiento", "Ajustá inicio, bandeja, notificaciones y tiempos de refresco.")
         self.start_minimized = QCheckBox()
         self.start_minimized.setChecked(self.config.start_minimized)
         self.minimize_to_tray = QCheckBox()
@@ -159,42 +191,51 @@ class SettingsWindow(QDialog):
         self.activity_window = QSpinBox()
         self.activity_window.setRange(10, 3600)
         self.activity_window.setValue(self.config.activity_window_seconds)
-        layout.addRow("Iniciar minimizado", self.start_minimized)
-        layout.addRow("Minimizar al cerrar", self.minimize_to_tray)
-        layout.addRow("Notificaciones KDE", self.notifications)
-        layout.addRow("Indicadores en icono del tray", self.tray_indicators)
-        layout.addRow("Confirmar liberación de espacio", self.confirm_cache)
-        layout.addRow("Refresco estado (s)", self.refresh_interval)
-        layout.addRow("Refresco archivos locales (s)", self.cache_interval)
-        layout.addRow("Ventana actividad (s)", self.activity_window)
+        form.addRow("Iniciar minimizado", self.start_minimized)
+        form.addRow("Minimizar al cerrar", self.minimize_to_tray)
+        form.addRow("Notificaciones KDE", self.notifications)
+        form.addRow("Indicadores en icono del tray", self.tray_indicators)
+        form.addRow("Confirmar liberación de espacio", self.confirm_cache)
+        form.addRow("Refresco estado (s)", self.refresh_interval)
+        form.addRow("Refresco archivos locales (s)", self.cache_interval)
+        form.addRow("Ventana actividad (s)", self.activity_window)
+        layout.addWidget(group)
+        layout.addStretch()
         return tab
 
     def _paths_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QFormLayout(tab)
-        self.systemd_dir = self._path_row(self.config.systemd_user_dir, layout, "Servicios systemd user")
-        self.mounts_dir = self._path_row(self.config.mounts_base_dir, layout, "Montajes")
-        self.cache_dir = self._path_row(self.config.rclone_cache_dir, layout, "Archivos locales rclone")
-        self.logs_dir = self._path_row(self.config.logs_dir, layout, "Logs")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        group, form = self._make_form_group("Rutas", "Definí dónde buscar servicios, montajes, cache y logs locales.")
+        self.systemd_dir = self._path_row(self.config.systemd_user_dir, form, "Servicios systemd user")
+        self.mounts_dir = self._path_row(self.config.mounts_base_dir, form, "Montajes")
+        self.cache_dir = self._path_row(self.config.rclone_cache_dir, form, "Archivos locales rclone")
+        self.logs_dir = self._path_row(self.config.logs_dir, form, "Logs")
+        layout.addWidget(group)
+        layout.addStretch()
         return tab
 
     def _maintenance_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        clean_all = QPushButton("Liberar espacio en disco de todos los rclone")
-        clean_all.setIcon(icon("user-trash", "edit-delete"))
-        cache_size = QPushButton("Ver tamaño total ocupado")
-        cache_size.setIcon(icon("drive-harddisk", "folder"))
-        logs_size = QPushButton("Ver tamaño total de logs")
-        logs_size.setIcon(icon("text-x-log", "text-x-generic"))
-        clean_logs = QPushButton("Limpiar logs de todos los servicios")
-        clean_logs.setIcon(icon("edit-clear"))
-        clean_errors = QPushButton("Limpiar historial de errores general")
-        clean_errors.setIcon(icon("dialog-warning"))
-        restart_all = QPushButton("Reiniciar todos los servicios activos")
-        restart_all.setIcon(icon("view-refresh"))
-        daemon_reload = QPushButton("Recargar daemon systemd user")
-        daemon_reload.setIcon(icon("system-run"))
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        info_group, info_layout = self._make_group("Información", "Consultá el uso local de cache y logs.")
+        clean_group, clean_layout = self._make_group("Limpieza", "Acciones para liberar espacio o limpiar registros locales.")
+        services_group, services_layout = self._make_group("Servicios", "Acciones globales sobre los servicios rclone.")
+
+        clean_all = self._make_action_button("Liberar espacio en disco", "user-trash", "Limpiar cache local de todos los servicios rclone", fallback_icon="edit-delete", minimum_width=220)
+        cache_size = self._make_action_button("Ver tamaño ocupado", "drive-harddisk", "Calcular el tamaño total usado por archivos locales", fallback_icon="folder", minimum_width=220)
+        logs_size = self._make_action_button("Ver tamaño de logs", "text-x-log", "Calcular el tamaño total de logs", fallback_icon="text-x-generic", minimum_width=220)
+        clean_logs = self._make_action_button("Limpiar logs", "edit-clear", "Limpiar logs locales de todos los servicios", minimum_width=220)
+        clean_errors = self._make_action_button("Limpiar historial de errores", "dialog-warning", "Borrar el historial general de errores", minimum_width=220)
+        clean_errors.setProperty("warning", True)
+        clean_errors.setStyleSheet("QPushButton[warning=\"true\"] { font-weight: 600; }")
+        restart_all = self._make_action_button("Reiniciar servicios activos", "view-refresh", "Reiniciar todos los servicios rclone activos", minimum_width=220)
+        daemon_reload = self._make_action_button("Recargar daemon systemd user", "system-run", "Ejecutar systemctl --user daemon-reload", minimum_width=220)
         clean_all.clicked.connect(self.request_clean_all.emit)
         cache_size.clicked.connect(self.request_show_total_cache.emit)
         logs_size.clicked.connect(self.request_show_total_logs.emit)
@@ -202,15 +243,89 @@ class SettingsWindow(QDialog):
         clean_errors.clicked.connect(self.request_clean_error_history.emit)
         restart_all.clicked.connect(self.request_restart_all.emit)
         daemon_reload.clicked.connect(lambda: QMessageBox.information(self, "daemon-reload", self.systemd.daemon_reload().stderr or "Finalizado."))
-        layout.addWidget(cache_size)
-        layout.addWidget(logs_size)
-        layout.addWidget(clean_all)
-        layout.addWidget(clean_logs)
-        layout.addWidget(clean_errors)
-        layout.addWidget(restart_all)
-        layout.addWidget(daemon_reload)
+
+        info_layout.addLayout(self._make_button_row([cache_size, logs_size]))
+        clean_layout.addLayout(self._make_button_row([clean_all, clean_logs]))
+        clean_layout.addLayout(self._make_button_row([clean_errors]))
+        services_layout.addLayout(self._make_button_row([restart_all, daemon_reload]))
+        layout.addWidget(info_group)
+        layout.addWidget(clean_group)
+        layout.addWidget(services_group)
         layout.addStretch()
         return tab
+
+    def _section_title(self, text: str, subtitle: str | None = None) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        title = QLabel(text)
+        title_font = title.font()
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+        if subtitle:
+            description = QLabel(subtitle)
+            description.setWordWrap(True)
+            description.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            layout.addWidget(description)
+        return wrapper
+
+    def _make_group(self, title: str, subtitle: str | None = None) -> tuple[QGroupBox, QVBoxLayout]:
+        group = QGroupBox(title)
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        if subtitle:
+            description = QLabel(subtitle)
+            description.setWordWrap(True)
+            layout.addWidget(description)
+        return group, layout
+
+    def _make_form_group(self, title: str, subtitle: str | None = None) -> tuple[QGroupBox, QFormLayout]:
+        group, outer = self._make_group(title, subtitle)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        outer.addLayout(form)
+        return group, form
+
+    def _make_action_button(
+        self,
+        text: str,
+        icon_name: str,
+        tooltip: str,
+        *,
+        fallback_icon: str | None = None,
+        minimum_width: int = 0,
+    ) -> QPushButton:
+        button = QPushButton(text)
+        button.setIcon(icon(icon_name, fallback_icon) if fallback_icon else icon(icon_name))
+        button.setToolTip(tooltip)
+        if minimum_width:
+            button.setMinimumWidth(minimum_width)
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return button
+
+    def _make_button_row(self, buttons: list[QPushButton]) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        for button in buttons:
+            row.addWidget(button)
+        row.addStretch()
+        return row
+
+    def _centered_cell(self, widget: QWidget) -> QWidget:
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(widget)
+        return wrapper
 
     def _detected_services_for_settings(self) -> list[RcloneService]:
         return load_services(Path(self.config.systemd_user_dir), self.config.services, ignored_services=[])
@@ -256,7 +371,9 @@ class SettingsWindow(QDialog):
             edit.setText(directory)
 
     def _add_manual_service(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(self, "Agregar .service", str(Path.home()), "Systemd service (*.service)")
+        services_dir = Path(self.config.systemd_user_dir).expanduser()
+        initial_dir = services_dir if services_dir.exists() else Path.home()
+        filename, _ = QFileDialog.getOpenFileName(self, "Agregar .service", str(initial_dir), "Systemd service (*.service)")
         if filename and filename not in self.config.services:
             self.config.services.append(filename)
             save_config(self.config)

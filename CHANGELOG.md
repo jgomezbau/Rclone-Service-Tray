@@ -4,6 +4,28 @@ Todos los cambios importantes de Rclone Service Tray se documentarán en este ar
 
 El formato está inspirado en [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) y el proyecto sigue versionado semántico cuando aplique.
 
+## [1.0.1] - 2026-04-29
+
+### Fixed
+
+- Evita que contadores acumulados de `rclone core/stats` dejen servicios en `Sincronizando` cuando RC está inactivo.
+- Normaliza iconos, fuente y estados visuales en el paquete `.deb`.
+- Clasifica advertencias benignas de archivos temporales, VFS cache local y subidas demoradas de OneDrive sin activar error crítico visual.
+- Evita pulsos de actividad por logs antiguos al iniciar la app si RC reporta estado inactivo.
+- Permite limpiar logs ubicados en la ruta estándar de rclone `~/.local/state/rclone`.
+- Evita marcar como error la limpieza global de logs cuando un servicio no tiene log configurado o el archivo aún no existe.
+- Evita que el historial de errores se repueble inmediatamente con los mismos errores antiguos después de limpiarlo.
+
+### Changed
+
+- Rediseña la ventana de Ajustes con una estética más limpia y consistente.
+- Reorganiza la pestaña `Mantenimiento` en bloques de información, limpieza y servicios.
+- Simplifica la pestaña `Servicios`: elimina la columna de acción por fila y conserva la activación mediante la columna `Activo`.
+- Mueve `Guardar ajustes` a una acción inferior alineada a la derecha.
+- Abre el selector `Agregar .service` directamente en la carpeta de servicios systemd user configurada.
+- Resume el resultado de `Limpiar logs` en un mensaje único cuando no hay errores.
+- Muestra mensajes de limpieza de historial de errores en castellano.
+
 ## [1.0.0] - 2026-04-28
 
 ### Added

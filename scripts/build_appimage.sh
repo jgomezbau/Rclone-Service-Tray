@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.1}"
 APPDIR="$ROOT/build/appimage/RcloneServiceTray.AppDir"
 DIST="$ROOT/dist"
 PYTHON_BIN="${PYTHON_BIN:-python3}"

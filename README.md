@@ -471,11 +471,10 @@ La ventana de Ajustes se organiza en:
 
 Funciones destacadas:
 
-- Servicios detectados con checkbox `Activo en Rclone Service Tray`
+- Servicios detectados con checkbox `Activo`
 - Detalle RC/API por servicio
 - Prueba de conexion RC
 - Sugerencia de configuracion RC con puerto recomendado
-- Boton `Ignorar`
 - Boton `Restaurar ignorados`
 - Seleccion de carpetas para systemd, montajes, archivos locales y logs
 - Tema `system`, `light` o `dark`
@@ -497,6 +496,9 @@ Desde Ajustes -> `Mantenimiento`:
 - Limpiar historial de errores general
 - Reiniciar todos los servicios activos
 - Recargar daemon systemd user
+
+La pestaña agrupa las acciones en `Informacion`, `Limpieza` y `Servicios`.
+Cuando la limpieza global de logs finaliza correctamente, la app muestra un resumen unico en lugar del detalle de cada archivo.
 
 Todas las operaciones destructivas piden confirmacion.
 
@@ -550,13 +552,13 @@ python3 -m rclonetray
 Construir `.deb`:
 
 ```bash
-VERSION=1.0.0 scripts/build_deb.sh
+VERSION=1.0.1 scripts/build_deb.sh
 ```
 
 Instalar:
 
 ```bash
-sudo apt install ./dist/rclone-service-tray_1.0.0_all.deb
+sudo apt install ./dist/rclone-service-tray_1.0.1_all.deb
 ```
 
 El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria para evitar reemplazar una instalacion oficial de rclone por el paquete de la distribucion.
@@ -564,20 +566,20 @@ El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria p
 Construir AppImage:
 
 ```bash
-VERSION=1.0.0 scripts/build_appimage.sh
+VERSION=1.0.1 scripts/build_appimage.sh
 ```
 
 Si `appimagetool` existe, el resultado esperado es:
 
 ```text
-dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
+dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
 ```
 
 Ejecutar AppImage:
 
 ```bash
-chmod +x dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
-./dist/Rclone-Service-Tray-1.0.0-x86_64.AppImage
+chmod +x dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
+./dist/Rclone-Service-Tray-1.0.1-x86_64.AppImage
 ```
 
 Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fallback para revisar el contenido.
@@ -585,7 +587,7 @@ Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fa
 Construir todo:
 
 ```bash
-VERSION=1.0.0 scripts/build_all.sh
+VERSION=1.0.1 scripts/build_all.sh
 ```
 
 ## Publicar release
@@ -596,9 +598,9 @@ Flujo recomendado:
 
 ```bash
 pytest
-VERSION=1.0.0 scripts/build_all.sh
-git tag -a v1.0.0 -m "v1.0.0"
-git push origin v1.0.0
+VERSION=1.0.1 scripts/build_all.sh
+git tag -a v1.0.1 -m "v1.0.1"
+git push origin v1.0.1
 ```
 
 GitHub Actions vuelve a ejecutar los tests, construye el `.deb` y el AppImage, y los adjunta a la release.
@@ -673,6 +675,12 @@ Otros archivos usados por la aplicacion:
 ```text
 ~/.config/rclone-service-tray/rclone-service-tray.log
 ~/.config/rclone-service-tray/errors.jsonl
+```
+
+Para logs de servicios rclone, la limpieza segura acepta la carpeta configurada en `logs_dir` y tambien la ruta estandar:
+
+```text
+~/.local/state/rclone
 ```
 
 ## Comandos usados por la app

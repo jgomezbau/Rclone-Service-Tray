@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from rclonetray.log_manager import LogManager, classify_error_entry, classify_error_line, is_error_line, normalize_error_message
+from rclonetray.log_manager import ErrorEntry, LogManager, classify_error_entry, classify_error_line, is_error_line, normalize_error_message
 from rclonetray.service_model import RcloneService
 from rclonetray.systemd_manager import CommandResult
 
@@ -8,6 +8,14 @@ from rclonetray.systemd_manager import CommandResult
 class FakeSystemd:
     def journal_warnings(self, service: str, lines: int = 50) -> CommandResult:
         return CommandResult(True, "", "", 0)
+
+
+class FakeSystemdWithJournal:
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+
+    def journal_warnings(self, service: str, lines: int = 50) -> CommandResult:
+        return CommandResult(True, self.stdout, "", 0)
 
 
 def test_info_vfs_cache_cleaned_is_not_error() -> None:
@@ -181,3 +189,70 @@ def test_repeated_vfs_cache_error_is_critical() -> None:
     ]
 
     assert classify_error_line(lines[0], lines) == "critical"
+
+
+def test_onedrive_slow_upload_single_error_is_transient_warning(tmp_path: Path) -> None:
+    log_file = tmp_path / "rclone.log"
+    line = "2026/04/28 10:00:00 ERROR : big-file.zip: upload chunks may be taking too long"
+    log_file.write_text(line + "\n", encoding="utf-8")
+    service = RcloneService(name="rclone-OneDrive.service", path=tmp_path / "rclone-OneDrive.service", log_file=log_file)
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=tmp_path / "errors.jsonl")  # type: ignore[arg-type]
+
+    logs.sync_service_errors(service)
+
+    entries = logs.history_error_entries_for_service(service)
+    assert is_error_line(line)
+    assert entries[0].severity == "warning"
+    assert entries[0].error_type == "Advertencia transitoria: upload interrumpido o demorado"
+    assert logs.active_history_error_entries_for_service(service) == []
+
+
+def test_repeated_onedrive_slow_upload_error_is_critical() -> None:
+    lines = [
+        f"2026/04/28 10:0{index}:00 ERROR : big-file.zip: upload chunks may be taking too long"
+        for index in range(4)
+    ]
+
+    assert classify_error_line(lines[0], lines) == "critical"
+
+
+def test_onedrive_slow_upload_group_includes_suggestion() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    line = "2026/04/28 10:00:00 ERROR : big-file.zip: upload chunks may be taking too long"
+
+    text = logs.format_grouped_errors([classify_error_entry(line, [line])], "empty")
+
+    assert "Tipo: Advertencia transitoria: upload interrumpido o demorado" in text
+    assert "Puede ocurrir si el equipo se suspendió durante una subida" in text
+
+
+def test_onedrive_slow_upload_duplicate_sources_generate_one_warning_event(tmp_path: Path) -> None:
+    line = (
+        "2026/04/28 10:00:00 ERROR : big-file.zip: upload chunks may be taking too long - "
+        "try reducing --onedrive-chunk-size or decreasing --transfers"
+    )
+    log_file = tmp_path / "rclone.log"
+    log_file.write_text(line + "\n", encoding="utf-8")
+    service = RcloneService(name="rclone-OneDrive.service", path=tmp_path / "rclone-OneDrive.service", log_file=log_file)
+    logs = LogManager(FakeSystemdWithJournal(line), logs_dir=tmp_path, error_history_path=tmp_path / "errors.jsonl")  # type: ignore[arg-type]
+
+    logs.sync_service_errors(service)
+    entries = logs.history_error_entries_for_service(service)
+    grouped = logs.grouped_errors(entries)
+
+    assert len(entries) == 1
+    assert len(grouped) == 1
+    assert entries[0].severity == "warning"
+    assert entries[0].error_type == "Advertencia transitoria: upload interrumpido o demorado"
+    assert not any(entry.severity == "critical" and entry.line == line for entry in entries)
+
+
+def test_onedrive_slow_upload_group_dedupes_legacy_critical_entry() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    line = "2026/04/28 10:00:00 ERROR : big-file.zip: upload chunks may be taking too long"
+
+    grouped = logs.grouped_errors([ErrorEntry(line, severity="critical"), classify_error_entry(line, [line])])
+
+    assert len(grouped) == 1
+    assert grouped[0].severity == "warning"
+    assert grouped[0].error_type == "Advertencia transitoria: upload interrumpido o demorado"

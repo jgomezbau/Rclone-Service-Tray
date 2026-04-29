@@ -135,6 +135,8 @@ class MainWindow(QMainWindow):
         refresh.setIcon(icon("view-refresh"))
         restart_all = QPushButton("Reiniciar todos")
         restart_all.setIcon(icon("view-refresh"))
+        self.toggle_all_services_button = QPushButton()
+        self.toggle_all_services_button.clicked.connect(self.toggle_all_services)
         errors = QPushButton("Ver errores recientes")
         errors.setIcon(icon("dialog-warning"))
         settings = QToolButton()
@@ -146,11 +148,13 @@ class MainWindow(QMainWindow):
         settings.clicked.connect(self.open_settings)
         bottom.addWidget(refresh)
         bottom.addWidget(restart_all)
+        bottom.addWidget(self.toggle_all_services_button)
         bottom.addWidget(errors)
         bottom.addStretch()
         bottom.addWidget(settings)
         layout.addLayout(bottom)
         self.setCentralWidget(root)
+        self._update_global_service_button()
 
     def reload_services(self) -> None:
         self.services = load_services(
@@ -172,9 +176,13 @@ class MainWindow(QMainWindow):
             service.cache_files = info.files
             service.cache_mtime = info.mtime
             self.logs.sync_service_errors(service, self._last_error_clear_time(service))
-            self._update_service_activity(service)
+            if self._service_is_stopped(service):
+                self._clear_activity_for_stopped_service(service)
+            else:
+                self._update_service_activity(service)
             self._refresh_error_state(service)
         self._populate_table()
+        self._update_global_service_button()
         if self.tray_controller is not None:
             self.tray_controller.update_services(self.services)
 
@@ -319,6 +327,9 @@ class MainWindow(QMainWindow):
             service.activity = "syncing"
             service.activity_source = "transient"
             return
+        if self._service_is_stopped(service):
+            self._clear_activity_for_stopped_service(service)
+            return
         if service.rc_enabled:
             cached = service.activity_summary
             rc_summary = cached if isinstance(cached, ActivitySummary) and cached.source == "rc" else None
@@ -377,6 +388,12 @@ class MainWindow(QMainWindow):
             return
         service.rc_last_check = dt.datetime.now().replace(microsecond=0).isoformat()
         self._check_transient_expiry(service)
+        if self._service_is_stopped(service):
+            service.rc_status = "unavailable" if summary.state == "unavailable" else service.rc_status
+            self._clear_activity_for_stopped_service(service)
+            self._refresh_error_state(service)
+            self._update_service_row(service)
+            return
         if summary.state == "unavailable":
             service.rc_status = "unavailable"
             service.rc_error_count = 0
@@ -452,7 +469,10 @@ class MainWindow(QMainWindow):
         result = action(service.name)
         service.active_state, service.sub_state = self.systemd.show_state(service.name)
         self._clear_transient_state(service)
-        self._update_service_activity(service)
+        if self._service_is_stopped(service):
+            self._clear_activity_for_stopped_service(service)
+        else:
+            self._update_service_activity(service)
         self._refresh_error_state(service)
         self._update_service_row(service)
         QMessageBox.information(self, title, result.stdout or result.stderr or "Comando finalizado.")
@@ -479,6 +499,18 @@ class MainWindow(QMainWindow):
         service.activity_until = None
         service.activity_reason = None
 
+    def _service_is_stopped(self, service: RcloneService) -> bool:
+        return service.active_state not in {"active", "activating"}
+
+    def _clear_activity_for_stopped_service(self, service: RcloneService) -> None:
+        service.activity = "idle"
+        service.activity_source = "systemd"
+        service.activity_until = None
+        service.activity_reason = None
+        service.activity_summary = None
+        service.rc_error_count = 0
+        self._clear_transient_state(service)
+
     def _activity_pulse_active(self, service: RcloneService) -> bool:
         until = service.activity_until
         if until is None:
@@ -490,6 +522,9 @@ class MainWindow(QMainWindow):
 
     def _check_transient_expiry(self, service: RcloneService) -> None:
         self._transient_state_active(service)
+        if self._service_is_stopped(service):
+            self._clear_activity_for_stopped_service(service)
+            return
         if self._activity_pulse_active(service):
             return
         if service.rc_enabled and service.rc_status == "active":
@@ -779,7 +814,15 @@ class MainWindow(QMainWindow):
             return
         results = self.logs.clear_logs_for_services(self.services)
         self.refresh()
-        text = "\n".join(f"{name}: {'OK' if result.ok else 'ERROR'} {result.stderr or result.stdout}" for name, result in results)
+        errors = [(name, result) for name, result in results if not result.ok]
+        if errors:
+            text = "\n".join(f"{name}: ERROR {result.stderr or result.stdout}" for name, result in errors)
+        else:
+            cleaned = sum(1 for _, result in results if result.stdout.startswith("Log cleaned:"))
+            skipped = len(results) - cleaned
+            text = f"Logs limpiados correctamente: {cleaned}."
+            if skipped:
+                text += f"\nServicios sin log para limpiar: {skipped}."
         QMessageBox.information(self, "Limpiar logs", text or "No hay logs configurados.")
 
     def clean_log_for_service(self, service: RcloneService) -> None:
@@ -799,6 +842,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_service_error_history_clear():
             return
         self._mark_error_history_cleared(service)
+        self.logs.suppress_current_errors_for_service(service)
         result = self.logs.clear_error_history_for_service(service)
         self.refresh()
         QMessageBox.information(self, "Limpiar errores", result.stdout or result.stderr)
@@ -813,6 +857,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Ok:
             return
         self._mark_all_error_history_cleared()
+        self.logs.suppress_current_errors_for_services(self.services)
         result = self.logs.clear_error_history()
         self.refresh()
         QMessageBox.information(self, "Limpiar historial de errores", result.stdout or result.stderr)
@@ -839,6 +884,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_service_error_history_clear():
             return
         self._mark_error_history_cleared(service)
+        self.logs.suppress_current_errors_for_service(service)
         result = self.logs.clear_error_history_for_service(service)
         self.refresh()
         dialog.set_history_text(self._history_errors_text(service))
@@ -889,6 +935,83 @@ class MainWindow(QMainWindow):
         self.tray_controller = tray_controller
         self.tray_controller.update_services(self.services)
 
+    def _all_services_active(self) -> bool:
+        return bool(self.services) and all(service.active_state == "active" for service in self.services)
+
+    def _update_global_service_button(self) -> None:
+        button = getattr(self, "toggle_all_services_button", None)
+        if button is None:
+            return
+        if self._all_services_active():
+            button.setText("Detener todos los servicios")
+            button.setIcon(icon("media-playback-stop"))
+            button.setToolTip("Detener todos los servicios rclone activos")
+        else:
+            button.setText("Iniciar todos los servicios")
+            button.setIcon(icon("media-playback-start"))
+            button.setToolTip("Iniciar todos los servicios rclone detenidos")
+        button.setEnabled(bool(self.services))
+
+    def toggle_all_services(self) -> None:
+        if self._all_services_active():
+            self.stop_all_services()
+        else:
+            self.start_all_services()
+
+    def start_all_services(self) -> None:
+        targets = [service for service in self.services if service.active_state != "active"]
+        if not targets:
+            return
+        output = []
+        for service in targets:
+            self._set_transient_state(service, "starting", "Montando servicio…")
+        QApplication.processEvents()
+        for service in targets:
+            result = self.systemd.start(service.name)
+            service.active_state, service.sub_state = self.systemd.show_state(service.name)
+            self._clear_transient_state(service)
+            self._update_service_activity(service)
+            self._refresh_error_state(service)
+            self._update_service_row(service)
+            output.append(f"{service.name}: {'OK' if result.ok else 'ERROR'} {result.stderr or result.stdout}")
+        self._finish_global_service_action()
+        QMessageBox.information(self, "Iniciar todos los servicios", "\n".join(output))
+
+    def stop_all_services(self) -> None:
+        targets = [service for service in self.services if service.active_state == "active"]
+        if not targets:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Detener todos los servicios",
+            "Se detendrán todos los servicios rclone activos.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        output = []
+        for service in targets:
+            self._set_transient_state(service, "stopping", "Deteniendo servicio…")
+        QApplication.processEvents()
+        for service in targets:
+            result = self.systemd.stop(service.name)
+            service.active_state, service.sub_state = self.systemd.show_state(service.name)
+            self._clear_transient_state(service)
+            if self._service_is_stopped(service):
+                self._clear_activity_for_stopped_service(service)
+            else:
+                self._update_service_activity(service)
+            self._refresh_error_state(service)
+            self._update_service_row(service)
+            output.append(f"{service.name}: {'OK' if result.ok else 'ERROR'} {result.stderr or result.stdout}")
+        self._finish_global_service_action()
+        QMessageBox.information(self, "Detener todos los servicios", "\n".join(output))
+
+    def _finish_global_service_action(self) -> None:
+        self._update_global_service_button()
+        if self.tray_controller is not None:
+            self.tray_controller.update_services(self.services)
+
     def restart_all(self) -> None:
         output = []
         for service in self.services:
@@ -904,6 +1027,7 @@ class MainWindow(QMainWindow):
             output.append(f"{service.name}: {'OK' if result.ok else 'ERROR'} {result.stderr or result.stdout}")
         if self.tray_controller is not None:
             self.tray_controller.update_services(self.services)
+        self._update_global_service_button()
         QMessageBox.information(self, "Reiniciar todos", "\n".join(output))
 
     def open_settings(self) -> None:
