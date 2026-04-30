@@ -26,6 +26,11 @@ NON_ERROR_RE = re.compile(
 )
 RCLONE_TS_RE = re.compile(r"^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\b")
 DNS_WEBDAV_RE = re.compile(r"(lookup|127\.0\.0\.53:53|i/o timeout|server misbehaving|Propfind)", re.I)
+DNS_CONNECTIVITY_RE = re.compile(
+    r"(lookup|127\.0\.0\.53:53|server misbehaving|i/o timeout|temporary failure in name resolution|"
+    r"no such host|connection refused|network is unreachable|dial tcp)",
+    re.I,
+)
 LOOKUP_HOST_RE = re.compile(r"lookup\s+([A-Za-z0-9._-]+)", re.I)
 URL_RE = re.compile(r"(https?://[^\s\"]+)", re.I)
 RCLONE_OBJECT_RE = re.compile(r"\b(?:ERROR|CRITICAL|INFO|NOTICE|DEBUG)\s*:?\s+(.+?):\s+(.+)$", re.I)
@@ -46,6 +51,14 @@ DIRECTORY_NOT_EMPTY_RE = re.compile(
     re.I,
 )
 CANCELLATION_WINDOW_SECONDS = 30
+DNS_GROUPING_WINDOW_SECONDS = 30
+DNS_REPETITION_WINDOW_SECONDS = 300
+DNS_CONNECTIVITY_ERROR_TYPE = "DNS local / conectividad temporal"
+DNS_CONNECTIVITY_SUGGESTION = (
+    "Revisar VPN, NetworkManager, systemd-resolved o DNS configurado. "
+    "Puede ocurrir al cambiar de red, activar/desactivar VPN, volver de suspensión "
+    "o cuando systemd-resolved queda inconsistente."
+)
 ONEDRIVE_SLOW_UPLOAD_SUGGESTION = (
     "Puede ocurrir si el equipo se suspendió durante una subida. "
     "Reiniciar el servicio rclone o reintentar la operación."
@@ -80,6 +93,8 @@ class ErrorEntry:
 
 
 def is_error_line(line: str) -> bool:
+    if is_dns_connectivity_error(line):
+        return True
     if DIRECTORY_NOT_EMPTY_RE.search(line):
         return True
     if ONEDRIVE_SLOW_UPLOAD_RE.search(line):
@@ -279,11 +294,17 @@ class LogManager:
         for entry in dedupe_error_entries("", normalized_entries):
             normalized = summarize_error_message(entry.line)
             file_path = extract_error_file(entry.line)
+            timestamp = parse_error_timestamp(entry.line)
+            grouping_stamp = ""
             if is_vfs_cache_error(entry.line):
                 normalized = "VFS cache local inconsistente al abrir archivo"
                 file_path = extract_vfs_cache_error_file(entry.line) or file_path
-            timestamp = parse_error_timestamp(entry.line)
-            grouping_stamp = ""
+            if is_dns_connectivity_error(entry.line):
+                normalized = summarize_error_message(entry.line)
+                file_path = dns_error_file(entry.line)
+                grouping_stamp = dns_grouping_window_stamp(timestamp)
+                if normalized == "Problema temporal de DNS/conectividad":
+                    normalized = "No se pudo resolver el host del remote"
             if is_cancelled_operation(entry.line) and not is_temporary_file(extract_error_file(entry.line)):
                 normalized = "Transferencias canceladas por el usuario"
                 file_path = ""
@@ -511,6 +532,11 @@ def summarize_error_message(line: str) -> str:
     _, message = split_rclone_object_message(line)
     message = URL_RE.sub("<url>", message)
     message = re.sub(r"\s+", " ", message).strip()
+    if is_dns_connectivity_error(line):
+        host = extract_dns_host(line)
+        if host:
+            return f"No se pudo resolver {host}"
+        return "Problema temporal de DNS/conectividad"
     if is_directory_not_empty_cleanup(line):
         return "Limpieza de directorio cancelada: directory not empty"
     cancelled_copy = re.search(
@@ -555,6 +581,9 @@ def stable_error_event_key(service_name: str, entry: ErrorEntry) -> str:
     if is_vfs_cache_error(entry.line):
         message = "VFS cache local inconsistente al abrir archivo"
         file_path = extract_vfs_cache_error_file(entry.line) or file_path
+    if is_dns_connectivity_error(entry.line):
+        message = summarize_error_message(entry.line)
+        file_path = dns_error_file(entry.line)
     return "\0".join([service_name, stamp, message, file_path])
 
 
@@ -589,6 +618,7 @@ def is_special_error_line(line: str) -> bool:
         or is_onedrive_slow_upload_error(line)
         or is_cancelled_operation(line)
         or is_directory_not_empty_cleanup(line)
+        or is_dns_connectivity_error(line)
     )
 
 
@@ -606,6 +636,8 @@ def classify_error_line(line: str, following_context: list[str]) -> str:
         return "critical" if is_repeated_vfs_cache_error(line, following_context) else "warning"
     if is_onedrive_slow_upload_error(line):
         return "critical" if is_repeated_onedrive_slow_upload_error(line, following_context) else "warning"
+    if is_dns_connectivity_error(line):
+        return "critical" if is_repeated_dns_connectivity_error(line, following_context) else "warning"
     return "critical"
 
 
@@ -623,6 +655,8 @@ def error_type_for_line(line: str, severity: str) -> str:
         return "VFS cache local inconsistente"
     if is_onedrive_slow_upload_error(line):
         return "Advertencia transitoria: upload interrumpido o demorado"
+    if is_dns_connectivity_error(line):
+        return DNS_CONNECTIVITY_ERROR_TYPE
     return error_type_for_severity(severity)
 
 
@@ -676,6 +710,10 @@ def is_onedrive_slow_upload_error(line: str) -> bool:
     return bool(ONEDRIVE_SLOW_UPLOAD_RE.search(line))
 
 
+def is_dns_connectivity_error(line: str) -> bool:
+    return bool(DNS_CONNECTIVITY_RE.search(line))
+
+
 def is_cancelled_operation(line: str) -> bool:
     return bool(CANCELLED_OPERATION_RE.search(line))
 
@@ -700,9 +738,17 @@ def has_nearby_cancelled_operation(line: str, lines: list[str]) -> bool:
 
 
 def cancellation_window_stamp(timestamp: dt.datetime | None) -> str:
+    return time_window_stamp(timestamp, CANCELLATION_WINDOW_SECONDS)
+
+
+def dns_grouping_window_stamp(timestamp: dt.datetime | None) -> str:
+    return time_window_stamp(timestamp, DNS_GROUPING_WINDOW_SECONDS)
+
+
+def time_window_stamp(timestamp: dt.datetime | None, window_seconds: int) -> str:
     if timestamp is None:
         return ""
-    window_start_second = int(timestamp.timestamp()) // CANCELLATION_WINDOW_SECONDS * CANCELLATION_WINDOW_SECONDS
+    window_start_second = int(timestamp.timestamp()) // window_seconds * window_seconds
     window_start = dt.datetime.fromtimestamp(window_start_second)
     return window_start.isoformat(sep=" ", timespec="seconds")
 
@@ -767,7 +813,28 @@ def is_repeated_onedrive_slow_upload_error(line: str, lines: list[str]) -> bool:
     return repeats > 3
 
 
+def is_repeated_dns_connectivity_error(line: str, lines: list[str]) -> bool:
+    target_host = extract_dns_host(line)
+    target_timestamp = parse_error_timestamp(line)
+    if not target_host or target_timestamp is None:
+        return False
+    repeats = 0
+    for candidate in lines:
+        if not is_dns_connectivity_error(candidate):
+            continue
+        if extract_dns_host(candidate) != target_host:
+            continue
+        timestamp = parse_error_timestamp(candidate)
+        if timestamp is None:
+            continue
+        if abs((timestamp - target_timestamp).total_seconds()) <= DNS_REPETITION_WINDOW_SECONDS:
+            repeats += 1
+    return repeats > 3
+
+
 def suggestion_for_error_type(error_type: str) -> str | None:
+    if error_type == DNS_CONNECTIVITY_ERROR_TYPE:
+        return DNS_CONNECTIVITY_SUGGESTION
     if error_type == "Advertencia transitoria: upload interrumpido o demorado":
         return ONEDRIVE_SLOW_UPLOAD_SUGGESTION
     return None
@@ -790,6 +857,17 @@ def extract_domain(text: str) -> str | None:
         url = match.group(1)
         return re.sub(r"^https?://", "", url).split("/", 1)[0]
     return None
+
+
+def extract_dns_host(text: str) -> str | None:
+    return extract_domain(text)
+
+
+def dns_error_file(line: str) -> str:
+    file_path = extract_error_file(line)
+    if file_path and file_path not in {"/", "''", '""'} and not re.search(r"\broot\b", file_path, re.I):
+        return file_path
+    return "remote root"
 
 
 def extract_url_base(text: str) -> str | None:

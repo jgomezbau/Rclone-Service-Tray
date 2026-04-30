@@ -4,6 +4,16 @@ Todos los cambios importantes de Rclone Service Tray se documentarán en este ar
 
 El formato está inspirado en [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) y el proyecto sigue versionado semántico cuando aplique.
 
+## [1.0.3] - 2026-04-30
+
+### Changed
+
+- Actualiza la version del proyecto a `1.0.3`.
+
+### Fixed
+
+- Clasifica fallos temporales de DNS/conectividad de rclone como advertencias agrupadas por host.
+
 ## [1.0.2] - 2026-04-29
 
 ### Fixed

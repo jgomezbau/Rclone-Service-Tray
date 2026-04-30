@@ -586,13 +586,13 @@ python3 -m rclonetray
 Construir `.deb`:
 
 ```bash
-VERSION=1.0.2 scripts/build_deb.sh
+VERSION=1.0.3 scripts/build_deb.sh
 ```
 
 Instalar:
 
 ```bash
-sudo apt install ./dist/rclone-service-tray_1.0.2_all.deb
+sudo apt install ./dist/rclone-service-tray_1.0.3_all.deb
 ```
 
 El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria para evitar reemplazar una instalacion oficial de rclone por el paquete de la distribucion.
@@ -600,20 +600,20 @@ El paquete recomienda `rclone`, pero no lo fuerza como dependencia obligatoria p
 Construir AppImage:
 
 ```bash
-VERSION=1.0.2 scripts/build_appimage.sh
+VERSION=1.0.3 scripts/build_appimage.sh
 ```
 
 Si `appimagetool` existe, el resultado esperado es:
 
 ```text
-dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
+dist/Rclone-Service-Tray-1.0.3-x86_64.AppImage
 ```
 
 Ejecutar AppImage:
 
 ```bash
-chmod +x dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
-./dist/Rclone-Service-Tray-1.0.2-x86_64.AppImage
+chmod +x dist/Rclone-Service-Tray-1.0.3-x86_64.AppImage
+./dist/Rclone-Service-Tray-1.0.3-x86_64.AppImage
 ```
 
 Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fallback para revisar el contenido.
@@ -621,7 +621,7 @@ Si `appimagetool` no esta instalado, el script genera un `AppDir.tar.gz` como fa
 Construir todo:
 
 ```bash
-VERSION=1.0.2 scripts/build_all.sh
+VERSION=1.0.3 scripts/build_all.sh
 ```
 
 ## Publicar release
@@ -632,9 +632,9 @@ Flujo recomendado:
 
 ```bash
 pytest
-VERSION=1.0.2 scripts/build_all.sh
-git tag -a v1.0.2 -m "v1.0.2"
-git push origin v1.0.2
+VERSION=1.0.3 scripts/build_all.sh
+git tag -a v1.0.3 -m "v1.0.3"
+git push origin v1.0.3
 ```
 
 GitHub Actions vuelve a ejecutar los tests, construye el `.deb` y el AppImage, y los adjunta a la release.

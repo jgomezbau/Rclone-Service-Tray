@@ -96,6 +96,102 @@ def test_webdav_dns_diagnosis_is_suggested() -> None:
     assert diagnosis.commands[2] == "rclone lsf Nextcloud: --max-depth 1 -vv"
 
 
+def test_dropbox_local_dns_lookup_is_warning() -> None:
+    line = (
+        '2026/04/30 10:00:00 ERROR : /: Dir.Stat error: Post "https://api.dropboxapi.com/2/files/list_folder": '
+        "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+    )
+    entry = classify_error_entry(line, [line])
+
+    assert is_error_line(line)
+    assert entry.severity == "warning"
+    assert entry.error_type == "DNS local / conectividad temporal"
+
+
+def test_nextcloud_local_dns_lookup_is_warning() -> None:
+    line = (
+        '2026/04/30 10:00:00 ERROR : /: Dir.Stat error: couldn\'t list files: Propfind "https://juanbau.duckdns.org:444/remote.php/dav/files/jgomezbau/": '
+        "dial tcp: lookup juanbau.duckdns.org on 127.0.0.53:53: server misbehaving"
+    )
+    entry = classify_error_entry(line, [line])
+
+    assert entry.severity == "warning"
+    assert entry.error_type == "DNS local / conectividad temporal"
+
+
+def test_dir_stat_io_and_start_cursor_dns_errors_group_within_30_seconds() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    lines = [
+        (
+            '2026/04/30 10:00:00 ERROR : /: Dir.Stat error: Post "https://api.dropboxapi.com/2/files/list_folder": '
+            "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+        ),
+        (
+            '2026/04/30 10:00:12 ERROR : /: IO error: Post "https://api.dropboxapi.com/2/files/list_folder": '
+            "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+        ),
+        (
+            '2026/04/30 10:00:18 INFO  : Dropbox root \'\': Failed to get StartCursor: Post "https://api.dropboxapi.com/2/files/list_folder/get_latest_cursor": '
+            "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+        ),
+    ]
+    grouped = logs.grouped_errors([classify_error_entry(line, lines) for line in lines])
+
+    assert len(grouped) == 1
+    assert grouped[0].severity == "warning"
+    assert grouped[0].error_type == "DNS local / conectividad temporal"
+    assert grouped[0].message == "No se pudo resolver api.dropboxapi.com"
+    assert grouped[0].file == "remote root"
+    assert grouped[0].count == 3
+
+
+def test_failed_start_cursor_dns_is_warning_even_when_info_line() -> None:
+    line = (
+        '2026/04/30 10:00:00 INFO  : Dropbox root \'\': Failed to get StartCursor: Post "https://api.dropboxapi.com/2/files/list_folder/get_latest_cursor": '
+        "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+    )
+    entry = classify_error_entry(line, [line])
+
+    assert is_error_line(line)
+    assert entry.severity == "warning"
+    assert entry.error_type == "DNS local / conectividad temporal"
+
+
+def test_repeated_dns_error_more_than_three_times_in_five_minutes_is_critical() -> None:
+    lines = [
+        (
+            f'2026/04/30 10:00:0{index} ERROR : /: IO error: Post "https://api.dropboxapi.com/2/files/list_folder": '
+            "dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+        )
+        for index in range(4)
+    ]
+
+    assert classify_error_line(lines[0], lines) == "critical"
+
+
+def test_dns_summary_replaces_long_urls_with_host_summary() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    line = (
+        '2026/04/30 10:00:00 ERROR : /: IO error: Propfind "https://juanbau.duckdns.org:444/remote.php/dav/files/jgomezbau/very/long/path": '
+        "dial tcp: lookup juanbau.duckdns.org on 127.0.0.53:53: server misbehaving"
+    )
+
+    grouped = logs.grouped_errors([classify_error_entry(line, [line])])
+
+    assert grouped[0].message == "No se pudo resolver juanbau.duckdns.org"
+    assert "https://juanbau.duckdns.org" not in grouped[0].message
+
+
+def test_dns_group_includes_contextual_suggestion() -> None:
+    logs = LogManager(FakeSystemd())  # type: ignore[arg-type]
+    line = "2026/04/30 10:00:00 ERROR : /: IO error: dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving"
+
+    text = logs.format_grouped_errors([classify_error_entry(line, [line])], "empty")
+
+    assert "Revisar VPN, NetworkManager, systemd-resolved o DNS configurado" in text
+    assert "Puede ocurrir al cambiar de red" in text
+
+
 def test_temporary_lock_error_followed_by_real_upload_is_resolved_warning(tmp_path: Path) -> None:
     log_file = tmp_path / "rclone.log"
     log_file.write_text(

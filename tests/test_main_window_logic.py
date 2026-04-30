@@ -711,6 +711,28 @@ def test_warning_history_does_not_mark_visual_error_when_service_and_rc_are_ok(t
     assert not service.recent_error
 
 
+def test_isolated_dns_warning_with_rc_idle_does_not_mark_visual_error(tmp_path: Path) -> None:
+    history = tmp_path / "errors.jsonl"
+    history.write_text(
+        '{"service": "rclone-Dropbox.service", "line": "2026/04/30 10:00:00 ERROR : /: IO error: dial tcp: lookup api.dropboxapi.com on 127.0.0.53:53: server misbehaving", "severity": "warning", "type": "DNS local / conectividad temporal"}\n',
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path, "rclone-Dropbox.service")
+    service.active_state = "active"
+    service.rc_error_count = 0
+    service.service_failed = False
+    logs = LogManager(FakeSystemd(), logs_dir=tmp_path, error_history_path=history)  # type: ignore[arg-type]
+    window = MainWindow.__new__(MainWindow)
+    window.logs = logs
+    window.config = AppConfig()
+
+    window._refresh_error_state(service)
+
+    assert service.error_count_history == 0
+    assert service.recent_errors == 0
+    assert not service.recent_error
+
+
 def test_cancelation_with_rc_idle_does_not_mark_visual_error(tmp_path: Path) -> None:
     history = tmp_path / "errors.jsonl"
     history.write_text(
